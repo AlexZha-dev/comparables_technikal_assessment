@@ -1,0 +1,61 @@
+{
+  "queries": [
+    {
+      "id": "q1",
+      "query": "Find AI-driven fintech companies in the Nordics with more than 100 employees",
+      "expected": {
+        "industries": ["Fintech"],
+        "locations": ["Finland", "Sweden", "Norway"],
+        "employee_min": 100,
+        "min_results": 1
+      },
+      "notes": "Strict structured filters + light keywords."
+    },
+    {
+      "id": "q2",
+      "query": "Renewable energy startups in Germany founded after 2018",
+      "expected": {
+        "industries": ["Energy"],
+        "locations": ["Germany"],
+        "founded_after": 2018,
+        "min_results": 1
+      },
+      "notes": "Time-range + industry + location."
+    },
+    {
+      "id": "q3",
+      "query": "Healthcare companies with $50M-$100M revenue in the USA",
+      "expected": {
+        "industries": ["Healthcare"],
+        "locations": ["USA"],
+        "revenue_buckets": ["50M-100M"],
+        "min_results": 1
+      },
+      "notes": "Revenue-bucket filter."
+    },
+    {
+      "id": "q4",
+      "query": "Autonomous driving and machine learning companies in the Netherlands",
+      "expected": {
+        "industries": ["Automotive"],
+        "locations": ["Netherlands"],
+        "keywords_any": ["autonomous", "machine learning", "AI"],
+        "min_results": 1
+      },
+      "notes": "Keyword-heavy query, filters as soft anchor."
+    },
+    {
+      "id": "q5",
+      "query": "Biotech in France with more than 5000 employees",
+      "expected": {
+        "industries": ["Biotech"],
+        "locations": ["France"],
+        "employee_min": 5000,
+        "min_results": 0,
+        "allow_empty": true,
+        "allow_employee_relax": true
+      },
+      "notes": "Edge case: dataset max employees≈5000 in France/Biotech, so the strict threshold cannot be met; the system may relax via revise_search."
+    }
+  ]
+}

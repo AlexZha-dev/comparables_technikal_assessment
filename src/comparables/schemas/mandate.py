@@ -17,7 +17,7 @@ class FilterSpec(BaseModel):
     founded_before: int | None = None
     keywords: list[str] = Field(default_factory=list)
 
-    @field_validator("industries", "locations", mode="before")
+    @field_validator("industries", "locations", "revenue_buckets", "keywords", mode="before")
     @classmethod
     def _coerce_none(cls, v):
         return [] if v is None else v

@@ -21,6 +21,7 @@ from comparables.agent.prompts import (
     VALIDATE_CANDIDATE_USER_TEMPLATE,
     render_user,
 )
+from comparables.agent.sanitize import sanitize_mandate
 from comparables.agent.state import AgentState, ScoredHit, ValidatedItem
 from comparables.core.context import RunContext
 from comparables.core.exceptions import (
@@ -78,7 +79,7 @@ async def parse_mandate_node(state: AgentState, ctx: RunContext, llm: LLMClient)
     user = render_user(PARSE_MANDATE_USER_TEMPLATE, query=raw)
     t0 = time.perf_counter()
     try:
-        mandate: ParsedMandate = await llm.complete_json(
+        raw_mandate: ParsedMandate = await llm.complete_json(
             system=PARSE_MANDATE_SYSTEM,
             user=user,
             schema_model=ParsedMandate,
@@ -86,6 +87,8 @@ async def parse_mandate_node(state: AgentState, ctx: RunContext, llm: LLMClient)
             temperature=0.0,
             max_tokens=512,
         )
+        # Strip hallucinated industries/locations/revenue values.
+        mandate = sanitize_mandate(raw_mandate)
         parse_ok = True
         parse_error = None
     except LLMSchemaError as exc:
@@ -263,7 +266,7 @@ async def revise_search_node(state: AgentState, ctx: RunContext, llm: LLMClient)
     )
     t0 = time.perf_counter()
     try:
-        new_mandate: ParsedMandate = await llm.complete_json(
+        new_raw: ParsedMandate = await llm.complete_json(
             system=REVISE_SEARCH_SYSTEM,
             user=user,
             schema_model=ParsedMandate,
@@ -271,6 +274,7 @@ async def revise_search_node(state: AgentState, ctx: RunContext, llm: LLMClient)
             temperature=0.3,
             max_tokens=512,
         )
+        new_mandate = sanitize_mandate(new_raw)
         ok = True
     except LLMSchemaError as exc:
         logger.warning("revise_search.failed", error=str(exc))
