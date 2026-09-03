@@ -86,10 +86,11 @@ class LLMClient:
         ctx: RunContext | None = None,
         temperature: float = 0.0,
         max_tokens: int = 1024,
+        think: bool = False,
     ) -> tuple[str, int, int]:
         """Free-form completion. Returns (text, tokens_in, tokens_out)."""
         text, in_t, out_t = await self._call(
-            system=system, user=user, temperature=temperature, max_tokens=max_tokens
+            system=system, user=user, temperature=temperature, max_tokens=max_tokens, think=think
         )
         if ctx is not None:
             ctx.inc_llm(in_t, out_t)
@@ -104,6 +105,7 @@ class LLMClient:
         ctx: RunContext | None = None,
         temperature: float = 0.0,
         max_tokens: int = 1024,
+        think: bool = False,
     ) -> BaseModel:
         """Structured completion: returns a validated Pydantic model.
 
@@ -116,14 +118,13 @@ class LLMClient:
             sys_msg = full_system if attempt == 0 else full_system + _RETRY_SUFFIX
             try:
                 text, in_t, out_t = await self._call(
-                    system=sys_msg, user=user, temperature=temperature, max_tokens=max_tokens
+                    system=sys_msg, user=user, temperature=temperature, max_tokens=max_tokens, think=think
                 )
                 if ctx is not None:
                     ctx.inc_llm(in_t, out_t)
                 return parse_strict(text, schema_model)
             except LLMSchemaError as exc:
                 last_err = exc
-                # loop → retry
                 continue
         raise LLMSchemaError(
             f"LLM failed to produce valid {schema_model.__name__} after "
@@ -138,8 +139,15 @@ class LLMClient:
         user: str,
         temperature: float,
         max_tokens: int,
+        think: bool = False,
     ) -> tuple[str, int, int]:
         t0 = time.perf_counter()
+        # Qwen3.5 / DeepSeek-R1 emit chain-of-thought that eats tokens. For
+        # structured-output tasks we want the final answer only. The Ollama
+        # OpenAI-compat API honors `extra_body["think"] = false`.
+        extra_body: dict = {}
+        if not think:
+            extra_body["think"] = False
         try:
             resp = await self.client.chat.completions.create(
                 model=self.model,
@@ -149,11 +157,14 @@ class LLMClient:
                 ],
                 temperature=temperature,
                 max_tokens=max_tokens,
+                extra_body=extra_body or None,
             )
+        except APITimeoutError as exc:
+            # NOTE: APITimeoutError subclasses APIConnectionError, so it must
+            # be matched FIRST.
+            raise LLMTimeoutError(f"LLM timed out after {self.timeout_s}s") from exc
         except (APIConnectionError, InternalServerError) as exc:
             raise LLMUnavailableError(f"LLM unavailable: {exc}") from exc
-        except APITimeoutError as exc:
-            raise LLMTimeoutError(f"LLM timed out after {self.timeout_s}s") from exc
         except RateLimitError as exc:
             raise LLMUnavailableError(f"LLM rate-limited: {exc}") from exc
 
