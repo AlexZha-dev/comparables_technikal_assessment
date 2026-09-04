@@ -1,0 +1,71 @@
+# Comparables.ai — full stack
+#
+# Brings up:
+#   - ollama:    the LLM server (with the configured model auto-pulled)
+#   - app:       the FastAPI service
+#
+# Usage:
+#   docker compose up --build        # build + run
+#   docker compose run --rm app python -m scripts.ingest        # one-shot ingestion
+#   docker compose run --rm app python -m scripts.run_eval       # run eval
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: comparables-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # healthcheck: ollama responds to /api/tags once it has any model
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  # One-shot pull of the configured model. Keeps the app portable across
+  # OLLAMA_MODEL choices — change in .env and re-run.
+  ollama-pull:
+    image: curlimages/curl:8.10.1
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      MODEL: ${OLLAMA_MODEL:-ministral-3:3b}
+    entrypoint: ["sh", "-c"]
+    command: >
+      "echo Pulling $$MODEL... &&
+       curl -fsS -X POST http://${OLLAMA_HOST}/api/pull -d '{\"name\":\"'$$MODEL'\"}' &&
+       echo Done."
+    restart: "no"
+
+  app:
+    build: .
+    container_name: comparables-app
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434/v1
+      OLLAMA_API_KEY: ollama
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-ministral-3:3b}
+      OLLAMA_TIMEOUT_S: ${OLLAMA_TIMEOUT_S:-120}
+      LOG_JSON: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./runs:/app/runs
+      # Mount the dataset read-only; ingestion reads it on demand.
+      - ./companies.json:/app/companies.json:ro
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
