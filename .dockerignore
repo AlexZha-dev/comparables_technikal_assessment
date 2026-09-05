@@ -1,0 +1,15 @@
+.git
+.venv
+.pytest_cache
+.pytest_tmp
+.pytest_tmp_*
+.mypy_cache
+.ruff_cache
+__pycache__
+*.py[cod]
+.coverage
+.env
+companies.json
+data
+runs
+eval/report.md

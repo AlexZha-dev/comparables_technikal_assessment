@@ -6,6 +6,8 @@ venv/
 .env
 .env.local
 data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
 data/*.pkl
 runs/*
 !runs/.gitkeep
@@ -14,6 +16,8 @@ runs/*
 .mypy_cache/
 .ruff_cache/
 .coverage
+.pytest_tmp/
+.pytest_tmp_*/
 htmlcov/
 dist/
 build/

@@ -17,9 +17,8 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-    # healthcheck: ollama responds to /api/tags once it has any model
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:11434/api/tags || exit 1"]
+      test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -27,7 +26,7 @@ services:
     restart: unless-stopped
 
   # One-shot pull of the configured model. Keeps the app portable across
-  # OLLAMA_MODEL choices — change in .env and re-run.
+  # LLM__MODEL choices — change in .env and re-run.
   ollama-pull:
     image: curlimages/curl:8.10.1
     depends_on:
@@ -35,11 +34,13 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
-      MODEL: ${OLLAMA_MODEL:-ministral-3:3b}
+      MODEL: ${LLM__MODEL:-ministral-3:3b}
     entrypoint: ["sh", "-c"]
     command: >
-      "echo Pulling $$MODEL... &&
-       curl -fsS -X POST http://${OLLAMA_HOST}/api/pull -d '{\"name\":\"'$$MODEL'\"}' &&
+      "echo Pulling $${MODEL}... &&
+       curl -fsS -X POST $${OLLAMA_HOST}/api/pull
+       -H 'Content-Type: application/json'
+       -d '{\"name\":\"'$${MODEL}'\",\"stream\":false}' &&
        echo Done."
     restart: "no"
 
@@ -52,12 +53,19 @@ services:
       ollama-pull:
         condition: service_completed_successfully
     environment:
-      OLLAMA_BASE_URL: http://ollama:11434/v1
-      OLLAMA_API_KEY: ollama
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-ministral-3:3b}
-      OLLAMA_TIMEOUT_S: ${OLLAMA_TIMEOUT_S:-120}
-      LOG_JSON: "true"
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      API__HOST: 0.0.0.0
+      API__PORT: 8000
+      API__LOG_JSON: "true"
+      API__LOG_LEVEL: ${API__LOG_LEVEL:-INFO}
+      LLM__BASE_URL: http://ollama:11434/v1
+      LLM__API_KEY: ollama
+      LLM__MODEL: ${LLM__MODEL:-ministral-3:3b}
+      LLM__TIMEOUT_S: ${LLM__TIMEOUT_S:-120}
+      LIMITS__TIMEOUT_S: ${LIMITS__TIMEOUT_S:-120}
+      PATHS__COMPANIES_JSON: /app/companies.json
+      PATHS__SQLITE: /app/data/companies.sqlite
+      PATHS__BM25_PICKLE: /app/data/bm25.pkl
+      PATHS__RUNS_DIR: /app/runs
     ports:
       - "8000:8000"
     volumes:
