@@ -1,12 +1,22 @@
 """Ingestion: companies.json → SQLite + BM25 pickle.
 
 Run via: python -m scripts.ingest
+
+Order of operations:
+    1. `alembic upgrade head`  — ensure schema is current (creates the
+       `companies` table + indexes on a fresh DB; no-op if already current).
+    2. seed rows into the SQLite file (DELETE + INSERT, not DROP).
+    3. build + pickle the BM25 index in parallel-ish (sync, offloaded).
+
+Schema is owned by Alembic (migrations/); this module only handles data.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import pickle
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -14,6 +24,7 @@ from rank_bm25 import BM25Okapi
 
 from comparables.core.config import get_settings
 from comparables.core.logging import configure_logging, get_logger
+from comparables.db.session import Database
 from comparables.repositories.bm25_repo import tokenize
 from comparables.repositories.company_repo import CompanyRepository
 from comparables.schemas.company import CompanyRecord
@@ -43,32 +54,68 @@ def _build_bm25(records: list[CompanyRecord]) -> tuple[BM25Okapi, list[int], lis
     return bm25, ids, doc_lens, avgdl
 
 
+def _run_alembic_upgrade() -> None:
+    """Bring the schema up to head. Logs under the alembic logger.
+
+    Uses `python -m alembic` so the same venv / interpreter as the rest of
+    ingestion is used. `check=True` raises on failure → caller aborts.
+    """
+    logger.info("ingest.alembic_upgrade")
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.stdout:
+        for line in result.stdout.splitlines():
+            logger.info("alembic", line=line)
+    if result.returncode != 0:
+        if result.stderr:
+            for line in result.stderr.splitlines():
+                logger.error("alembic", line=line)
+        raise RuntimeError(f"alembic upgrade head failed (rc={result.returncode})")
+
+
 async def run_ingestion() -> dict[str, int | float]:
-    """End-to-end ingestion. Idempotent (overwrites). Returns stats."""
+    """End-to-end ingestion. Idempotent (overwrites data, schema is migrated)."""
     settings = get_settings()
     configure_logging(settings)
 
-    if not settings.companies_json_path.exists():
+    if not settings.paths.companies_json.exists():
         raise FileNotFoundError(
-            f"Source not found: {settings.companies_json_path}"
+            f"Source not found: {settings.paths.companies_json}"
         )
-    settings.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-    settings.bm25_pickle_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.sqlite.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bm25_pickle.parent.mkdir(parents=True, exist_ok=True)
 
     t0 = time.perf_counter()
-    logger.info("ingest.load_json", path=str(settings.companies_json_path))
-    records = _load_companies(settings.companies_json_path)
+    logger.info("ingest.load_json", path=str(settings.paths.companies_json))
+    records = _load_companies(settings.paths.companies_json)
     t_load = time.perf_counter() - t0
     logger.info("ingest.records_loaded", count=len(records), seconds=round(t_load, 2))
 
+    # Schema migration first — blocks until DB is current.
     t0 = time.perf_counter()
-    repo = CompanyRepository(path=settings.sqlite_path)
+    await asyncio.to_thread(_run_alembic_upgrade)
+    t_migrate = time.perf_counter() - t0
+    logger.info("ingest.alembic_done", seconds=round(t_migrate, 2))
+
+    # Data seed.
+    t0 = time.perf_counter()
+    db = Database.from_settings(settings)
+    await db.startup()
+    repo = CompanyRepository(db=db)
     try:
-        await repo.bulk_insert(records)
+        await repo.seed(records)
     finally:
-        await repo.close()
+        await db.shutdown()
     t_sqlite = time.perf_counter() - t0
-    logger.info("ingest.sqlite_built", path=str(settings.sqlite_path), seconds=round(t_sqlite, 2))
+    logger.info(
+        "ingest.sqlite_seeded",
+        path=str(settings.paths.sqlite),
+        seconds=round(t_sqlite, 2),
+    )
 
     t0 = time.perf_counter()
     bm25, ids, doc_lens, avgdl = await asyncio.to_thread(_build_bm25, records)
@@ -78,12 +125,12 @@ async def run_ingestion() -> dict[str, int | float]:
         "doc_lens": doc_lens,
         "avgdl": avgdl,
     }
-    with settings.bm25_pickle_path.open("wb") as f:
+    with settings.paths.bm25_pickle.open("wb") as f:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
     t_bm25 = time.perf_counter() - t0
     logger.info(
         "ingest.bm25_built",
-        path=str(settings.bm25_pickle_path),
+        path=str(settings.paths.bm25_pickle),
         seconds=round(t_bm25, 2),
         avgdl=round(avgdl, 2),
     )
@@ -93,6 +140,7 @@ async def run_ingestion() -> dict[str, int | float]:
         "sqlite_seconds": round(t_sqlite, 2),
         "bm25_seconds": round(t_bm25, 2),
         "load_seconds": round(t_load, 2),
+        "migrate_seconds": round(t_migrate, 2),
     }
     logger.info("ingest.done", **stats)
     return stats

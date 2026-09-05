@@ -1,11 +1,13 @@
 """Pydantic DTOs for the company catalog."""
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CompanyRecord(BaseModel):
     """One row in the company catalog."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: int
     name: str
