@@ -45,7 +45,7 @@ class CORSConfig:
     allow_credentials: bool = False
 
     @classmethod
-    def for_settings(cls, *, is_dev: bool, allowed_origins: list[str] | None = None) -> "CORSConfig":
+    def for_settings(cls, *, is_dev: bool, allowed_origins: list[str] | None = None) -> CORSConfig:
         if is_dev:
             # Dev mode: open CORS so OpenAPI/Redoc works from any local tooling.
             return cls(allow_origins=["*"])

@@ -5,10 +5,8 @@ Or:  python -m scripts.ollama_smoke
 """
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
-
 import pytest
+import pytest_asyncio
 
 from comparables.core.config import get_settings
 from comparables.core.context import RunContext
@@ -22,26 +20,31 @@ def _ollama_alive() -> bool:
     try:
         import httpx
 
-        r = httpx.get(f"{s.ollama_base_url.rstrip('/v1')}/api/tags", timeout=2.0)
-        return r.status_code == 200
+        r = httpx.get(s.ollama_base_url_alive, timeout=2.0)
+        return r.status_code == 200 and any(
+            model.get("name") == s.llm.model
+            for model in r.json().get("models", [])
+        )
     except Exception:
         return False
 
 
 pytestmark = pytest.mark.skipif(
-    not _ollama_alive(), reason="Ollama not reachable on OLLAMA_BASE_URL"
+    not _ollama_alive(), reason="Configured Ollama endpoint or model is unavailable"
 )
 
 
-@pytest.fixture
-def llm():
+@pytest_asyncio.fixture
+async def llm():
     s = get_settings()
-    return LLMClient(
-        base_url=s.ollama_base_url,
-        api_key=s.ollama_api_key,
-        model=s.ollama_model,
-        timeout_s=s.ollama_timeout_s,
+    client = LLMClient(
+        base_url=s.llm.base_url,
+        api_key=s.llm.api_key,
+        model=s.llm.model,
+        timeout_s=s.llm.timeout_s,
     )
+    yield client
+    await client.aclose()
 
 
 # ─── Tests ────────────────────────────────────────────────────────────
@@ -58,7 +61,7 @@ async def test_complete_text(llm):
         user="Reply with exactly: pong",
         max_tokens=8,
     )
-    assert "pong" in text.lower() or "pong" in text.lower(), f"got: {text!r}"
+    assert "pong" in text.lower(), f"got: {text!r}"
     assert in_t >= 0
     assert out_t >= 0
 
@@ -75,6 +78,7 @@ async def test_complete_json_mandate(llm):
         schema_model=ParsedMandate,
         ctx=ctx,
         max_tokens=300,
+        max_attempts=2,
     )
     assert m.filters.industries == ["Fintech"], m.filters.industries
     assert "Finland" in m.filters.locations, m.filters.locations

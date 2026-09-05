@@ -12,24 +12,21 @@ Key design points:
 """
 from __future__ import annotations
 
-import asyncio
 import time
-from typing import Any, TypeVar
+from typing import TypeVar
 
 from openai import (
     APIConnectionError,
     APITimeoutError,
     AsyncOpenAI,
     InternalServerError,
+    NotFoundError,
     RateLimitError,
 )
 from pydantic import BaseModel
 
 from comparables.core.context import RunContext
-from comparables.core.exceptions import (
-    LLMTimeoutError,
-    LLMUnavailableError,
-)
+from comparables.core.exceptions import LLMTimeoutError, LLMUnavailableError
 from comparables.llm.structured import LLMSchemaError, parse_strict, schema_instructions
 
 T = TypeVar("T", bound=BaseModel)
@@ -87,13 +84,40 @@ class LLMClient:
         temperature: float = 0.0,
         max_tokens: int = 1024,
         think: bool = False,
+        stage: str = "complete_text",
     ) -> tuple[str, int, int]:
         """Free-form completion. Returns (text, tokens_in, tokens_out)."""
-        text, in_t, out_t = await self._call(
-            system=system, user=user, temperature=temperature, max_tokens=max_tokens, think=think
-        )
         if ctx is not None:
-            ctx.inc_llm(in_t, out_t)
+            ctx.begin_llm_call()
+        started = time.perf_counter()
+        try:
+            text, in_t, out_t = await self._call(
+                system=system,
+                user=user,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                think=think,
+            )
+        except Exception as exc:
+            if ctx is not None:
+                ctx.add_event(
+                    "llm_call",
+                    stage=stage,
+                    ok=False,
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            raise
+        if ctx is not None:
+            ctx.add_llm_usage(in_t, out_t)
+            ctx.add_event(
+                "llm_call",
+                stage=stage,
+                ok=True,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                tokens_in=in_t,
+                tokens_out=out_t,
+            )
         return text, in_t, out_t
 
     async def complete_json(
@@ -106,6 +130,8 @@ class LLMClient:
         temperature: float = 0.0,
         max_tokens: int = 1024,
         think: bool = False,
+        max_attempts: int | None = None,
+        stage: str = "complete_json",
     ) -> BaseModel:
         """Structured completion: returns a validated Pydantic model.
 
@@ -114,21 +140,66 @@ class LLMClient:
         schema_sys = schema_instructions(schema_model)
         full_system = f"{system}\n\n{schema_sys}"
         last_err: Exception | None = None
-        for attempt in range(self.max_retries + 1):
+        attempts = min(
+            max_attempts or (self.max_retries + 1),
+            self.max_retries + 1,
+        )
+        attempts = max(1, attempts)
+        for attempt in range(attempts):
             sys_msg = full_system if attempt == 0 else full_system + _RETRY_SUFFIX
+            if ctx is not None:
+                ctx.begin_llm_call()
+            started = time.perf_counter()
             try:
                 text, in_t, out_t = await self._call(
-                    system=sys_msg, user=user, temperature=temperature, max_tokens=max_tokens, think=think
+                    system=sys_msg,
+                    user=user,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    think=think,
                 )
                 if ctx is not None:
-                    ctx.inc_llm(in_t, out_t)
-                return parse_strict(text, schema_model)
+                    ctx.add_llm_usage(in_t, out_t)
+                parsed = parse_strict(text, schema_model)
             except LLMSchemaError as exc:
                 last_err = exc
+                if ctx is not None:
+                    ctx.add_event(
+                        "llm_call",
+                        stage=stage,
+                        attempt=attempt + 1,
+                        ok=False,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        tokens_in=locals().get("in_t", 0),
+                        tokens_out=locals().get("out_t", 0),
+                        error=str(exc),
+                    )
                 continue
+            except Exception as exc:
+                if ctx is not None:
+                    ctx.add_event(
+                        "llm_call",
+                        stage=stage,
+                        attempt=attempt + 1,
+                        ok=False,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                raise
+            if ctx is not None:
+                ctx.add_event(
+                    "llm_call",
+                    stage=stage,
+                    attempt=attempt + 1,
+                    ok=True,
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    tokens_in=in_t,
+                    tokens_out=out_t,
+                )
+            return parsed
         raise LLMSchemaError(
             f"LLM failed to produce valid {schema_model.__name__} after "
-            f"{self.max_retries + 1} attempts; last error: {last_err}"
+            f"{attempts} attempts; last error: {last_err}"
         )
 
     # ─── Internals ──────────────────────────────────────────────────────
@@ -163,7 +234,7 @@ class LLMClient:
             # NOTE: APITimeoutError subclasses APIConnectionError, so it must
             # be matched FIRST.
             raise LLMTimeoutError(f"LLM timed out after {self.timeout_s}s") from exc
-        except (APIConnectionError, InternalServerError) as exc:
+        except (APIConnectionError, InternalServerError, NotFoundError) as exc:
             raise LLMUnavailableError(f"LLM unavailable: {exc}") from exc
         except RateLimitError as exc:
             raise LLMUnavailableError(f"LLM rate-limited: {exc}") from exc
@@ -182,8 +253,8 @@ class LLMClient:
     async def ping(self) -> bool:
         """Lightweight reachability check. Used by health/ready."""
         try:
-            await self.client.models.list()
-            return True
+            models = await self.client.models.list()
+            return any(model.id == self.model for model in models.data)
         except Exception:
             return False
 

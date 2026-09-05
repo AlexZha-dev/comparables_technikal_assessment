@@ -6,8 +6,8 @@ lives in one well-tested place rather than being inlined into the ASGI app.
 """
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import FastAPI
 
@@ -20,12 +20,9 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = app.state.settings
-    logger.info("startup.begin", env=settings.app_env, model=settings.ollama_model)
-
-    # Ensure dirs exist before any repo tries to open them.
-    settings.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-    settings.bm25_pickle_path.parent.mkdir(parents=True, exist_ok=True)
-    settings.runs_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "startup.begin", env=settings.api.env, model=settings.llm.model
+    )
 
     services = bootstrap_subsystems(settings)
     await services.startup()

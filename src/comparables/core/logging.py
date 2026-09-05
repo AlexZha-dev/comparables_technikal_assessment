@@ -7,8 +7,8 @@ from typing import Any
 
 import structlog
 
-from comparables.core.context import run_id_var
 from comparables.core.config import Settings
+from comparables.core.context import run_id_var
 
 
 def _add_run_id(_, __, event_dict: dict[str, Any]) -> dict[str, Any]:
@@ -23,7 +23,7 @@ def configure_logging(settings: Settings) -> None:
 
     Idempotent: safe to call multiple times.
     """
-    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    level = getattr(logging, settings.api.log_level.upper(), logging.INFO)
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
@@ -37,7 +37,7 @@ def configure_logging(settings: Settings) -> None:
         structlog.processors.TimeStamper(fmt="iso", utc=True),
     ]
 
-    if settings.log_json and not settings.is_dev:
+    if settings.api.log_json and not settings.is_dev:
         processors.extend(
             [
                 structlog.processors.StackInfoRenderer(),

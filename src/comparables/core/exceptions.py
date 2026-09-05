@@ -5,6 +5,8 @@ from __future__ import annotations
 class ComparablesError(Exception):
     """Base for all domain errors."""
 
+    run_id: str | None = None
+
 
 # ─── Data / index errors ───────────────────────────────────────────────
 class IndexNotFoundError(ComparablesError):

@@ -68,7 +68,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ─── Exception handlers ────────────────────────────────────────
     register_exception_handlers(app)
 
-    logger.info("app.created", env=settings.app_env)
+    logger.info("app.created", env=settings.api.env)
     return app
 
 
@@ -79,4 +79,4 @@ app = create_app()
 
 
 # ─── Backwards-compatible re-exports ─────────────────────────────────
-__all__ = ["create_app", "app", "RunIdMiddleware"]
+__all__ = ["RunIdMiddleware", "app", "create_app"]

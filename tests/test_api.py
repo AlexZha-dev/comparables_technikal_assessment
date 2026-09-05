@@ -5,7 +5,8 @@ Overriding the LLM at app.state level lets us test the full HTTP path
 """
 from __future__ import annotations
 
-from typing import Any
+import json
+from contextlib import asynccontextmanager
 
 import pytest
 import pytest_asyncio
@@ -42,29 +43,14 @@ class FakeLLM:
         if name == "SearchPlan":
             return SearchPlan(use_bm25=True, use_filters=True, limit_per_iter=50)
         if name == "BatchVerdicts":
-            from pydantic import BaseModel, Field
-
-            class Verdict(BaseModel):
-                company_id: int
-                relevant: bool
-                evidence_spans: list[str] = Field(default_factory=list)
-                reason: str = ""
-
-            class BatchVerdicts(BaseModel):
-                verdicts: list[Verdict] = Field(default_factory=list)
-
-            return BatchVerdicts(
-                verdicts=[
-                    Verdict(
-                        company_id=1,
-                        relevant=True,
-                        evidence_spans=[
-                            "AI-powered platform for fraud detection"
-                        ],
-                        reason="matches mandate",
-                    )
-                ]
-            )
+            from comparables.schemas.search import BatchVerdicts
+            payload = json.loads(kwargs["user"])
+            return BatchVerdicts.model_validate({"verdicts": [
+                {"company_id": record["id"], "criteria": [
+                    {"criterion_id": criterion["criterion_id"], "status": "supported" if record["id"] == 1 else "insufficient_evidence", "evidence": [{"field": "description", "span": record["description"]}] if record["id"] == 1 else []}
+                    for criterion in payload["criteria"]
+                ]} for record in payload["companies"]
+            ]})
         raise NotImplementedError(name)
 
     async def complete_text(self, **kwargs):
@@ -78,7 +64,13 @@ class FakeLLM:
 
 
 @pytest_asyncio.fixture
-async def app_with_fake_llm():
+async def app_with_fake_llm(monkeypatch):
+    from comparables.llm.client import LLMClient
+
+    async def ready_ping(self):
+        return True
+
+    monkeypatch.setattr(LLMClient, "ping", ready_ping)
     app: FastAPI = create_app()
     # Trigger lifespan manually via ASGI
     async with _LifespanManager(app):
@@ -93,10 +85,6 @@ async def app_with_fake_llm():
             run_repo=app.state.run_repo,
         )
         yield app
-
-
-# Tiny lifespan helper to avoid pulling in starlette's TestClient (sync).
-from contextlib import asynccontextmanager
 
 
 @asynccontextmanager
@@ -140,15 +128,20 @@ async def test_search_happy_path(client):
     body = r.json()
     assert body["run_id"]
     assert body["mandate"]["filters"]["industries"] == ["Fintech"]
-    assert body["mandate"]["filters"]["employee_min"] == 100
+    assert body["mandate"]["filters"]["employee_min"] == 101
     assert body["llm_calls"] >= 1
     assert body["llm_calls"] <= 5
     assert body["iterations"] <= 2
     assert len(body["final"]) <= 10
+    assert all(item["relevant"] and item["evidence"] for item in body["final"])
+    assert all(item["company"]["employee_count"] >= 101 for item in body["final"])
     # First candidate should be Nordic Fintech Solutions
-    if body["final"]:
-        assert body["final"][0]["company"]["id"] == 1
-        assert "AI-powered" in body["final"][0]["evidence"][0]["span"]
+    assert len(body["final"]) == 1
+    assert body["final"][0]["company"]["id"] == 1
+    assert any(
+        "AI-powered" in evidence["span"]
+        for evidence in body["final"][0]["evidence"]
+    )
 
 
 @pytest.mark.asyncio

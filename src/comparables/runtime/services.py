@@ -13,10 +13,12 @@ uses those flags to report partial degradation.
 """
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 
 from comparables.core.config import Settings
 from comparables.core.logging import get_logger
+from comparables.db.session import Database
 from comparables.llm.client import LLMClient
 from comparables.repositories.bm25_repo import BM25Repository
 from comparables.repositories.company_repo import CompanyRepository
@@ -34,11 +36,12 @@ class RuntimeServices:
 
     The constructor is intentionally minimal: it builds the objects but
     doesn't connect to anything. Call `await services.startup()` to actually
-    initialize async resources (SQLite pool, BM25 pickle).
+    initialize async resources (SQLAlchemy engine/pool, BM25 pickle).
     """
 
     settings: Settings
     tool_registry: ToolRegistry
+    database: Database
     company_repo: CompanyRepository
     bm25_repo: BM25Repository
     run_repo: RunRepository
@@ -51,7 +54,7 @@ class RuntimeServices:
     llm_ready: bool = False
 
     async def startup(self) -> None:
-        """Connect async resources (SQLite, BM25) and verify LLM reachable.
+        """Connect async resources (DB engine, BM25) and verify LLM reachable.
 
         Errors per subsystem are caught and reflected in the `*_ready` flags
         so the request-handling path can degrade gracefully — failed BM25 still
@@ -60,26 +63,28 @@ class RuntimeServices:
         try:
             await self.company_repo.connect()
             self.sqlite_ready = True
-            logger.info("startup.sqlite_ok", path=str(self.settings.sqlite_path))
-        except Exception as exc:  # noqa: BLE001 — partial-degradation surface
+            logger.info("startup.sqlite_ok", path=str(self.settings.paths.sqlite))
+        except Exception as exc:
             self.sqlite_ready = False
             logger.warning("startup.sqlite_failed", error=str(exc))
 
         try:
             await self.bm25_repo.load()
             self.bm25_loaded = True
-            logger.info("startup.bm25_ok", path=str(self.settings.bm25_pickle_path))
-        except Exception as exc:  # noqa: BLE001
+            logger.info("startup.bm25_ok", path=str(self.settings.paths.bm25_pickle))
+        except Exception as exc:
             self.bm25_loaded = False
             logger.warning("startup.bm25_failed", error=str(exc))
 
         try:
             self.llm_ready = bool(await self.llm_client.ping())
             if self.llm_ready:
-                logger.info("startup.llm_ok", model=self.settings.ollama_model)
+                logger.info("startup.llm_ok", model=self.settings.llm.model)
             else:
-                logger.warning("startup.llm_unreachable", base_url=self.settings.ollama_base_url)
-        except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "startup.llm_unreachable", base_url=self.settings.llm.base_url
+                )
+        except Exception as exc:
             self.llm_ready = False
             logger.warning("startup.llm_failed", error=str(exc))
 
@@ -94,29 +99,27 @@ class RuntimeServices:
 
     async def shutdown(self) -> None:
         """Close async resources. Errors are logged but never propagated."""
-        try:
-            await self.company_repo.close()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
+        with suppress(Exception):
+            await self.database.shutdown()
+        with suppress(Exception):
             await self.llm_client.aclose()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 # ─── Factory ──────────────────────────────────────────────────────────
 def bootstrap_subsystems(settings: Settings) -> RuntimeServices:
     """Construct all subsystems from settings. Doesn't touch I/O."""
+    database = Database.from_settings(settings)
     return RuntimeServices(
         settings=settings,
         tool_registry=default_registry(),
-        company_repo=CompanyRepository(path=settings.sqlite_path),
-        bm25_repo=BM25Repository(path=settings.bm25_pickle_path),
-        run_repo=RunRepository(runs_dir=settings.runs_dir),
+        database=database,
+        company_repo=CompanyRepository(db=database),
+        bm25_repo=BM25Repository(path=settings.paths.bm25_pickle),
+        run_repo=RunRepository(runs_dir=settings.paths.runs_dir),
         llm_client=LLMClient(
-            base_url=settings.ollama_base_url,
-            api_key=settings.ollama_api_key,
-            model=settings.ollama_model,
-            timeout_s=settings.ollama_timeout_s,
+            base_url=settings.llm.base_url,
+            api_key=settings.llm.api_key,
+            model=settings.llm.model,
+            timeout_s=settings.llm.timeout_s,
         ),
     )

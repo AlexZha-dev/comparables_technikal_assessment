@@ -9,10 +9,12 @@ RunEventType = Literal[
     "run_start",
     "parse_mandate",
     "plan_search",
+    "llm_call",
     "tool_call",
     "retrieval_iter",
     "revise_search",
     "validation",
+    "finalize",
     "run_end",
 ]
 
@@ -32,8 +34,15 @@ class RunLog(BaseModel):
     query: str
     events: list[RunEvent] = Field(default_factory=list)
     final_count: int = 0
+    outcome: str = "unknown"
     llm_calls: int = 0
+    tool_calls: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
+    estimated_cost_usd: float | None = None
+    retrieved_candidates: int = 0
+    validated_candidates: int = 0
+    iterations: int = 0
+    revised_searches: int = 0
     latency_ms: int = 0
     errors: list[dict[str, Any]] = Field(default_factory=list)

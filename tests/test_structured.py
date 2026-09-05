@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from comparables.llm.structured import extract_json_object, parse_strict, schema_instructions
-from comparables.schemas.mandate import FilterSpec, ParsedMandate
+from comparables.schemas.mandate import ParsedMandate
 
 
 def test_schema_instructions_mentions_required():
@@ -38,6 +38,7 @@ def test_parse_strict_valid_mandate():
 
 def test_parse_strict_invalid_raises():
     import pytest
+
     from comparables.core.exceptions import LLMSchemaError
 
     bad = '{"intent": 123}'  # intent must be str

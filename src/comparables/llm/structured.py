@@ -26,7 +26,6 @@ def schema_instructions(model: type[BaseModel]) -> str:
     """Render a Pydantic schema as a tight set of instructions for the LLM."""
     schema = schema_for(model)
     required = schema.get("required", [])
-    props = schema.get("properties", {})
     lines = [
         "Return ONLY a JSON object matching this schema. No prose, no markdown fences.",
         "Do not include keys not listed in `properties`.",
@@ -74,11 +73,11 @@ def parse_strict(text: str, model: type[T]) -> T:
 
 
 __all__ = [
-    "schema_for",
-    "schema_instructions",
-    "extract_json_object",
-    "parse_strict",
     "LLMSchemaError",
     "LLMTimeoutError",
     "LLMUnavailableError",
+    "extract_json_object",
+    "parse_strict",
+    "schema_for",
+    "schema_instructions",
 ]

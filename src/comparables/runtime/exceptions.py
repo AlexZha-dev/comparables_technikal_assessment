@@ -16,12 +16,12 @@ from fastapi.responses import JSONResponse
 from comparables.core.context import run_id_var
 from comparables.core.exceptions import (
     BudgetExceededError,
-    ComparablesError,
     CompanyNotFoundError,
+    ComparablesError,
     IndexNotFoundError,
+    LLMSchemaError,
     LLMTimeoutError,
     LLMUnavailableError,
-    LLMSchemaError,
     MandateParseError,
     RetrievalError,
     WorkflowTimeoutError,

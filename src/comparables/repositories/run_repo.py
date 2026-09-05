@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from comparables.core.exceptions import IndexNotFoundError
 from comparables.schemas.run import RunEvent, RunLog
 
 
@@ -60,33 +59,55 @@ class RunRepository:
 
         events: list[RunEvent] = []
         query = ""
-        llm_calls = tokens_in = tokens_out = 0
+        llm_calls = tool_calls = tokens_in = tokens_out = 0
         latency_ms = 0
         errors: list[dict[str, Any]] = []
         final_count = 0
+        outcome = "unknown"
+        estimated_cost_usd: float | None = None
+        retrieved_candidates = validated_candidates = iterations = revised_searches = 0
         for ln in lines:
             et = ln.get("type", "")
             d = ln.get("data", {}) or {}
             events.append(RunEvent(ts=ln.get("ts", 0.0), type=et, data=d))  # type: ignore[arg-type]
             if et == "run_start":
                 query = d.get("query", "")
-            if et == "parse_mandate":
-                llm_calls = max(llm_calls, 1)
-                tokens_in += int(d.get("tokens_in", 0))
-                tokens_out += int(d.get("tokens_out", 0))
-            if et == "validation":
-                llm_calls = max(llm_calls, 1)  # best-effort
             if et == "run_end":
                 final_count = int(d.get("final_count", 0))
+                outcome = str(d.get("outcome", "unknown"))
+                llm_calls = int(d.get("llm_calls", 0))
+                tool_calls = int(d.get("tool_calls", 0))
+                tokens_in = int(d.get("tokens_in", 0))
+                tokens_out = int(d.get("tokens_out", 0))
+                estimated_cost_usd = d.get("estimated_cost_usd")
+                retrieved_candidates = int(d.get("retrieved_candidates", 0))
+                validated_candidates = int(d.get("validated_candidates", 0))
+                iterations = int(d.get("iterations", 0))
+                revised_searches = int(d.get("revised_searches", 0))
                 latency_ms = int(d.get("latency_ms", 0))
+                errors = list(d.get("errors", []) or [])
+        if outcome == "unknown":
+            llm_events = [event for event in events if event.type == "llm_call"]
+            tool_events = [event for event in events if event.type == "tool_call"]
+            llm_calls = len(llm_events)
+            tool_calls = len(tool_events)
+            tokens_in = sum(int(event.data.get("tokens_in", 0)) for event in llm_events)
+            tokens_out = sum(int(event.data.get("tokens_out", 0)) for event in llm_events)
         return RunLog(
             run_id=run_id,
             query=query,
             events=events,
             final_count=final_count,
+            outcome=outcome,
             llm_calls=llm_calls,
+            tool_calls=tool_calls,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            estimated_cost_usd=estimated_cost_usd,
+            retrieved_candidates=retrieved_candidates,
+            validated_candidates=validated_candidates,
+            iterations=iterations,
+            revised_searches=revised_searches,
             latency_ms=latency_ms,
             errors=errors,
         )
