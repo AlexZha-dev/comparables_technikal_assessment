@@ -1,7 +1,7 @@
 """ToolRegistry: name → tool lookup, invocation, OpenAPI-style spec dump."""
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any
 
 from comparables.core.context import RunContext
 from comparables.core.exceptions import RetrievalError
@@ -44,8 +44,9 @@ class ToolRegistry:
         if fn is None:
             raise RetrievalError(f"Unknown tool: {name!r}; have {self.names()}")
         ctx.inc_tool()
-        ctx.add_event("tool_call", tool=name, args=args, ok=None, duration_ms=None)
         res = await timed(fn, args, ctx)
+        if not res.ok:
+            ctx.add_error(f"tool:{name}", RetrievalError(res.error or "tool failed"))
         ctx.add_event(
             "tool_call",
             tool=name,
@@ -53,20 +54,23 @@ class ToolRegistry:
             ok=res.ok,
             duration_ms=res.duration_ms,
             error=res.error,
+            meta=res.meta,
         )
         return res
 
 
 def default_registry() -> ToolRegistry:
-    """Build a registry with the three default tools."""
+    """Build the registry of bounded retrieval and hydration tools."""
     # Local import to avoid cycles
     from comparables.tools.bm25_search import bm25_search
     from comparables.tools.filter_search import filter_search
+    from comparables.tools.filtered_search import filtered_search
     from comparables.tools.get_company import get_company
 
     reg = ToolRegistry()
     reg.register(bm25_search)
     reg.register(filter_search)
+    reg.register(filtered_search)
     reg.register(get_company)
     return reg
 

@@ -11,12 +11,14 @@ Pickle format written by ingestion:
 from __future__ import annotations
 
 import asyncio
+import heapq
 import pickle
 import re
 from pathlib import Path
 from typing import Any
 
 from comparables.core.exceptions import IndexNotFoundError
+from comparables.schemas.search import Hit
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -33,6 +35,7 @@ class BM25Repository:
         self.path = path
         self.bm25: Any = None
         self.ids: list[int] = []
+        self._id_to_position: dict[int, int] = {}
         self._loaded = False
 
     # ─── Lifecycle ──────────────────────────────────────────────────────
@@ -47,6 +50,9 @@ class BM25Repository:
         data = await asyncio.to_thread(self._load_pickle, self.path)
         self.bm25 = data["bm25"]
         self.ids = list(data["ids"])
+        self._id_to_position = {
+            company_id: position for position, company_id in enumerate(self.ids)
+        }
         self._loaded = True
 
     @staticmethod
@@ -55,8 +61,8 @@ class BM25Repository:
             return pickle.load(f)
 
     # ─── Search ─────────────────────────────────────────────────────────
-    async def search(self, query: str, top_k: int = 50) -> list[tuple[int, float]]:
-        """Return [(company_id, bm25_score), ...] sorted by score desc.
+    async def search(self, query: str, top_k: int = 50) -> list[Hit]:
+        """Return typed `Hit(company_id, score)` list sorted by score desc.
 
         Empty / no-match queries return [].
         """
@@ -67,13 +73,65 @@ class BM25Repository:
         tokens = tokenize(query)
         if not tokens:
             return []
-        return await asyncio.to_thread(self._search_sync, tokens, top_k)
+        raw = await asyncio.to_thread(self._search_sync, tokens, top_k)
+        return [Hit(company_id=cid, score=float(s)) for cid, s in raw]
+
+    async def score_candidates(
+        self,
+        query: str,
+        company_ids: list[int],
+        top_k: int = 100,
+    ) -> list[Hit]:
+        """Score only an existing eligibility pool without expanding it."""
+        if not self._loaded or self.bm25 is None:
+            raise IndexNotFoundError("BM25Repository.load() not called")
+        tokens = tokenize(query)
+        unique_ids = list(dict.fromkeys(company_ids))[:100]
+        if not tokens or not unique_ids:
+            return []
+
+        def _score() -> list[tuple[int, float]]:
+            scores = self.bm25.get_scores(tokens)
+            selected = [
+                (company_id, float(scores[position]))
+                for company_id in unique_ids
+                if (position := self._id_to_position.get(company_id)) is not None
+                and float(scores[position]) > 0
+            ]
+            return sorted(selected, key=lambda item: (-item[1], item[0]))[:top_k]
+
+        raw = await asyncio.to_thread(_score)
+        return [Hit(company_id=company_id, score=score) for company_id, score in raw]
+
+    async def rank_eligible(
+        self, query: str, company_ids: list[int], top_k: int = 100
+    ) -> list[Hit]:
+        """Exact lexical top-K over the entire SQL eligibility mask.
+
+        Include zero-score eligible rows so the graph can diagnose weak
+        retrieval and revise keywords. Missing index IDs are not fabricated.
+        """
+        if not self._loaded or self.bm25 is None:
+            raise IndexNotFoundError("BM25Repository.load() not called")
+        tokens = tokenize(query)
+        if not company_ids or not tokens:
+            return []
+        limit = max(1, min(top_k, 100))
+
+        def _rank() -> list[Hit]:
+            scores = self.bm25.get_scores(tokens)
+            eligible = (
+                (cid, max(0.0, float(scores[self._id_to_position[cid]])))
+                for cid in set(company_ids) if cid in self._id_to_position
+            )
+            best = heapq.nsmallest(limit, eligible, key=lambda item: (-item[1], item[0]))
+            return [Hit(company_id=cid, score=score) for cid, score in best]
+
+        return await asyncio.to_thread(_rank)
 
     def _search_sync(self, tokens: list[str], top_k: int) -> list[tuple[int, float]]:
         scores = self.bm25.get_scores(tokens)
         # Argpartition for top-k faster than full sort on large corpora
-        import heapq
-
         # Negative scores for min-heap
         idx_scores = [(i, float(s)) for i, s in enumerate(scores) if s > 0]
         if not idx_scores:

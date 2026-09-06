@@ -1,23 +1,26 @@
 """Tests for the tool registry and default tools (BM25, filter, get_company)."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 import pytest_asyncio
 
+from comparables.core.config import get_settings
 from comparables.core.context import RunContext
+from comparables.db.session import Database
 from comparables.repositories.bm25_repo import BM25Repository
 from comparables.repositories.company_repo import CompanyRepository
-from comparables.tools.registry import ToolRegistry, default_registry
+from comparables.tools.registry import default_registry
 
 
 # ─── Fixtures ──────────────────────────────────────────────────────────
 @pytest_asyncio.fixture
 async def ctx_with_data():
-    cr = CompanyRepository(path=Path("data/companies.sqlite"))
-    bm = BM25Repository(path=Path("data/bm25.pkl"))
+    # Paths are isolated by the shared catalog fixture.
+    db = Database.from_settings()
+    await db.startup()
+    cr = CompanyRepository(db=db)
     await cr.connect()
+    bm = BM25Repository(path=get_settings().paths.bm25_pickle)
     await bm.load()
 
     ctx = RunContext.new()
@@ -34,12 +37,13 @@ async def ctx_with_data():
 
     yield ctx
     await cr.close()
+    await db.shutdown()
 
 
 # ─── Registry ──────────────────────────────────────────────────────────
-def test_default_registry_has_three_tools():
+def test_default_registry_has_bounded_search_tools():
     reg = default_registry()
-    assert reg.names() == ["bm25_search", "filter_search", "get_company"]
+    assert reg.names() == ["bm25_search", "filter_search", "filtered_search", "get_company"]
 
 
 def test_registry_specs_have_schemas():
@@ -52,6 +56,7 @@ def test_registry_specs_have_schemas():
 
 def test_registry_unknown_tool_raises():
     import asyncio
+
     from comparables.core.exceptions import RetrievalError
 
     reg = default_registry()
@@ -80,9 +85,12 @@ async def test_bm25_search_returns_hits(ctx_with_data):
 @pytest.mark.asyncio
 async def test_bm25_search_empty_query(ctx_with_data):
     reg = default_registry()
+    # Pydantic input validation rejects `query=""` (min_length=1) before the
+    # tool body even runs — the wrapper turns this into ok=False + error,
+    # so the workflow can degrade cleanly without crashing.
     res = await reg.invoke("bm25_search", {"query": ""}, ctx_with_data)
-    assert res.ok
-    assert res.data == []
+    assert not res.ok
+    assert res.error and "string_too_short" in res.error
 
 
 # ─── filter_search tool ───────────────────────────────────────────────

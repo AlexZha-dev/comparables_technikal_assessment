@@ -1,10 +1,17 @@
 """Tool: get_company — fetch a single record by id (for grounding)."""
 from __future__ import annotations
 
-from typing import Any
+from pydantic import BaseModel, Field
 
 from comparables.core.context import RunContext
 from comparables.tools.base import ToolResult, tool
+
+
+# ─── Typed input ────────────────────────────────────────────────────
+class GetCompanyInput(BaseModel):
+    """Inputs for `get_company`."""
+
+    company_id: int = Field(ge=1, description="Company id in the catalog (1..50_000).")
 
 
 @tool(
@@ -13,16 +20,9 @@ from comparables.tools.base import ToolResult, tool
         "Fetch the full record for a single company by id. Use to ground evidence "
         "spans or to enrich a candidate with its full text before validation."
     ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "company_id": {"type": "integer", "minimum": 1},
-        },
-        "required": ["company_id"],
-    },
+    input_model=GetCompanyInput,
 )
-async def get_company(args: dict[str, Any], ctx: RunContext) -> ToolResult:
-    cid: int = int(args["company_id"])
+async def get_company(args: GetCompanyInput, ctx: RunContext) -> ToolResult:
     company = getattr(ctx, "company_repo", None) or ctx.repos.company
-    rec = await company.fetch_one(cid)
+    rec = await company.fetch_one(args.company_id)
     return ToolResult(ok=True, data=rec.model_dump())
