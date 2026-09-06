@@ -6,7 +6,7 @@
       "expected": {
         "industries": ["Fintech"],
         "locations": ["Finland", "Sweden", "Norway"],
-        "employee_min": 100,
+        "employee_min": 101,
         "min_results": 1
       },
       "notes": "Strict structured filters + light keywords."
@@ -17,7 +17,7 @@
       "expected": {
         "industries": ["Energy"],
         "locations": ["Germany"],
-        "founded_after": 2018,
+        "founded_after": 2019,
         "min_results": 1
       },
       "notes": "Time-range + industry + location."
@@ -42,7 +42,7 @@
         "keywords_any": ["autonomous", "machine learning", "AI"],
         "min_results": 1
       },
-      "notes": "Keyword-heavy query, filters as soft anchor."
+      "notes": "Keyword-heavy query; structured filters remain mandatory. Automotive is a dataset taxonomy assumption."
     },
     {
       "id": "q5",
@@ -50,12 +50,11 @@
       "expected": {
         "industries": ["Biotech"],
         "locations": ["France"],
-        "employee_min": 5000,
+        "employee_min": 5001,
         "min_results": 0,
-        "allow_empty": true,
-        "allow_employee_relax": true
+        "allow_empty": true
       },
-      "notes": "Edge case: dataset max employees≈5000 in France/Biotech, so the strict threshold cannot be met; the system may relax via revise_search."
+      "notes": "Edge case: no eligible row. Revision may broaden lexical terms but must preserve the threshold and return an empty list."
     }
   ]
 }
