@@ -5,6 +5,7 @@ from typing import Any, TypedDict
 
 from comparables.schemas.company import CompanyRecord
 from comparables.schemas.mandate import ParsedMandate, SearchPlan
+from comparables.schemas.search import CriterionAssessment, Evidence
 
 
 class ScoredHit(TypedDict, total=False):
@@ -20,8 +21,9 @@ class ValidatedItem(TypedDict, total=False):
     company: CompanyRecord
     score: float
     relevant: bool
-    evidence: list[dict[str, str]]
+    evidence: list[Evidence]
     reason: str
+    criteria: list[CriterionAssessment]
 
 
 class AgentState(TypedDict, total=False):
@@ -32,6 +34,7 @@ class AgentState(TypedDict, total=False):
 
     # ─── Parsing ───────────────────────────────────────────────────────
     mandate: ParsedMandate | None
+    original_mandate: ParsedMandate | None
     parse_ok: bool
     parse_error: str | None
 

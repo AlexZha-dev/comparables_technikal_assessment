@@ -6,7 +6,7 @@ from comparables.agent.prompts import (
     ALLOWED_LOCATIONS,
     ALLOWED_REVENUE_BUCKETS,
 )
-from comparables.agent.sanitize import sanitize_mandate
+from comparables.agent.sanitize import fallback_mandate, sanitize_mandate
 from comparables.schemas.mandate import FilterSpec, ParsedMandate
 
 
@@ -102,6 +102,15 @@ def test_us_maps_to_usa():
     m = _m(locations=["US"])
     out = sanitize_mandate(m)
     assert out.filters.locations == ["USA"]
+
+
+def test_country_substrings_do_not_invent_usa_or_uk():
+    assert sanitize_mandate(_m(locations=["Australia"])).filters.locations == []
+    assert fallback_mandate("Find fintech in Ukraine").filters.locations == []
+
+
+def test_fallback_normalizes_strict_founding_year():
+    assert fallback_mandate("Energy in Germany founded after 2018").filters.founded_after == 2019
 
 
 def test_uk_maps_to_uk():

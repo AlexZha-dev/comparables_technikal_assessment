@@ -10,30 +10,34 @@ import json
 import time
 from typing import Any
 
+from comparables.agent.policies import (
+    CandidateRanker,
+    EligibilityPolicy,
+    has_structured_filters,
+)
 from comparables.agent.prompts import (
     PARSE_MANDATE_SYSTEM,
     PARSE_MANDATE_USER_TEMPLATE,
-    PLAN_SEARCH_SYSTEM,
-    PLAN_SEARCH_USER_TEMPLATE,
     REVISE_SEARCH_SYSTEM,
     REVISE_SEARCH_USER_TEMPLATE,
-    VALIDATE_CANDIDATE_SYSTEM,
-    VALIDATE_CANDIDATE_USER_TEMPLATE,
     render_user,
 )
-from comparables.agent.sanitize import sanitize_mandate
+from comparables.agent.sanitize import fallback_mandate, sanitize_mandate
+from comparables.agent.semantic import retrieval_query, semantic_criteria
 from comparables.agent.state import AgentState, ScoredHit, ValidatedItem
 from comparables.core.context import RunContext
 from comparables.core.exceptions import (
     BudgetExceededError,
     CompanyNotFoundError,
     LLMSchemaError,
+    LLMTimeoutError,
+    LLMUnavailableError,
 )
 from comparables.core.logging import get_logger
 from comparables.llm.client import LLMClient
 from comparables.schemas.company import CompanyRecord
 from comparables.schemas.mandate import ParsedMandate, SearchPlan
-from comparables.schemas.search import Evidence
+from comparables.services.semantic_validation import SemanticValidationService
 from comparables.tools.registry import ToolRegistry
 
 logger = get_logger(__name__)
@@ -44,37 +48,35 @@ def _limits(state: AgentState) -> dict[str, int]:
     return state.get("settings_limits", {}) or {}
 
 
-def _hits_to_scored(bm25: list[dict], filt: list[dict], w_bm: float, w_f: float) -> list[ScoredHit]:
-    """Merge BM25 and filter hits, normalize BM25 scores, combine."""
-    by_id: dict[int, ScoredHit] = {}
-    if bm25:
-        max_bm = max((h["score"] for h in bm25), default=1.0) or 1.0
-        for h in bm25:
-            cid = h["company_id"]
-            by_id[cid] = {
-                "company_id": cid,
-                "bm25_score": h["score"] / max_bm,
-                "filter_match": 0.0,
-                "score": (h["score"] / max_bm) * w_bm,
-            }
-    for h in filt:
-        cid = h["company_id"]
-        if cid in by_id:
-            by_id[cid]["filter_match"] = 1.0
-            by_id[cid]["score"] += 1.0 * w_f
-        else:
-            by_id[cid] = {
-                "company_id": cid,
-                "bm25_score": 0.0,
-                "filter_match": 1.0,
-                "score": 1.0 * w_f,
-            }
-    return sorted(by_id.values(), key=lambda x: x["score"], reverse=True)
+_LLM_RECOVERABLE_ERRORS = (
+    LLMSchemaError,
+    LLMTimeoutError,
+    LLMUnavailableError,
+    BudgetExceededError,
+)
+
+
+def _hits_to_scored(
+    bm25: list[dict],
+    filt: list[dict],
+    w_bm: float,
+    w_f: float,
+    *,
+    require_filter_match: bool = False,
+    keyword_boost: float = 1.0,
+) -> list[ScoredHit]:
+    """Compatibility wrapper around the deterministic ranking strategy."""
+    return CandidateRanker(w_bm, w_f).merge(
+        bm25,
+        filt,
+        require_filter_match=require_filter_match,
+        keyword_boost=keyword_boost,
+    )
 
 
 # ─── parse_mandate ─────────────────────────────────────────────────────
 async def parse_mandate_node(state: AgentState, ctx: RunContext, llm: LLMClient) -> dict:
-    """Convert raw_query to ParsedMandate (1 LLM call)."""
+    """Convert raw_query to ParsedMandate (at most two LLM attempts)."""
     raw = state.get("raw_query", "")
     user = render_user(PARSE_MANDATE_USER_TEMPLATE, query=raw)
     t0 = time.perf_counter()
@@ -86,26 +88,30 @@ async def parse_mandate_node(state: AgentState, ctx: RunContext, llm: LLMClient)
             ctx=ctx,
             temperature=0.0,
             max_tokens=512,
+            max_attempts=2,
+            stage="parse_mandate",
         )
-        # Strip hallucinated industries/locations/revenue values.
-        mandate = sanitize_mandate(raw_mandate)
+        mandate = sanitize_mandate(raw_mandate, raw_query=raw)
         parse_ok = True
         parse_error = None
-    except LLMSchemaError as exc:
+    except _LLM_RECOVERABLE_ERRORS as exc:
         logger.warning("parse_mandate.failed", error=str(exc))
-        mandate = ParsedMandate(intent=raw, filters=ParsedMandate.model_fields["filters"].default_factory())  # type: ignore[arg-type]
+        mandate = fallback_mandate(raw)
         parse_ok = False
         parse_error = str(exc)
+        ctx.add_error("parse_mandate", exc)
 
     ctx.add_event(
         "parse_mandate",
         ok=parse_ok,
         duration_ms=int((time.perf_counter() - t0) * 1000),
-        mandate=mandate.model_dump() if parse_ok else None,
+        mandate=mandate.model_dump(),
+        fallback_used=not parse_ok,
         error=parse_error,
     )
     return {
         "mandate": mandate,
+        "original_mandate": mandate.model_copy(deep=True),
         "parse_ok": parse_ok,
         "parse_error": parse_error,
         "llm_calls": ctx.llm_calls,
@@ -115,49 +121,38 @@ async def parse_mandate_node(state: AgentState, ctx: RunContext, llm: LLMClient)
 
 
 # ─── plan_search ───────────────────────────────────────────────────────
-async def plan_search_node(state: AgentState, ctx: RunContext, llm: LLMClient) -> dict:
-    """Decide which tools and limits to use (1 LLM call). Falls back to defaults."""
+async def plan_search_node(state: AgentState, ctx: RunContext) -> dict:
+    """Build a deterministic tool plan from the validated mandate."""
     mandate = state.get("mandate")
     if mandate is None:
         return {"plan": None, "plan_ok": False}
 
-    # If mandate is degenerate (no filters, no keywords), skip the plan call.
     f = mandate.filters
-    if not (f.keywords or f.industries or f.locations or f.employee_min or f.revenue_buckets):
-        return {
-            "plan": SearchPlan(use_bm25=True, use_filters=False, limit_per_iter=50),
-            "plan_ok": True,
-        }
-
-    user = render_user(
-        PLAN_SEARCH_USER_TEMPLATE, mandate_json=mandate.model_dump_json()
+    use_bm25 = bool(retrieval_query(mandate))
+    use_filters = has_structured_filters(f)
+    plan = SearchPlan(
+        use_bm25=use_bm25,
+        use_filters=use_filters,
+        keyword_boost=1.0,
+        limit_per_iter=100,
+        rationale=(
+            "filtered top-K over full SQL eligibility"
+            if use_bm25 and use_filters
+            else "structured SQL eligibility"
+            if use_filters
+            else "lexical BM25 retrieval"
+            if use_bm25
+            else "no retrievable criteria"
+        ),
     )
-    t0 = time.perf_counter()
-    try:
-        plan: SearchPlan = await llm.complete_json(
-            system=PLAN_SEARCH_SYSTEM,
-            user=user,
-            schema_model=SearchPlan,
-            ctx=ctx,
-            temperature=0.0,
-            max_tokens=256,
-        )
-        plan_ok = True
-    except LLMSchemaError:
-        plan = SearchPlan(
-            use_bm25=bool(f.keywords),
-            use_filters=bool(f.industries or f.locations or f.employee_min or f.revenue_buckets),
-            limit_per_iter=50,
-        )
-        plan_ok = False
-
     ctx.add_event(
         "plan_search",
-        ok=plan_ok,
-        duration_ms=int((time.perf_counter() - t0) * 1000),
+        ok=True,
+        deterministic=True,
+        fallback_parse=not state.get("parse_ok", False),
         plan=plan.model_dump(),
     )
-    return {"plan": plan, "plan_ok": plan_ok}
+    return {"plan": plan, "plan_ok": True}
 
 
 # ─── retrieve_and_score ────────────────────────────────────────────────
@@ -179,24 +174,30 @@ async def retrieve_and_score_node(
         return {"candidates": [], "iteration": state.get("iteration", 0) + 1}
 
     f = mandate.filters
-    use_bm25 = bool(plan and plan.use_bm25) or bool(f.keywords)
-    use_filters = bool(plan and plan.use_filters) or bool(
-        f.industries or f.locations or f.employee_min or f.employee_max
-        or f.revenue_buckets or f.founded_after or f.founded_before
-    )
-    per_iter = int((plan.limit_per_iter if plan else 50) or 50)
+    hard_filters = has_structured_filters(f)
+    lexical_query = retrieval_query(mandate)
+    use_bm25 = bool(lexical_query) and (plan is None or plan.use_bm25)
+    # An LLM-generated plan can never disable an explicit user constraint.
+    use_filters = hard_filters
+    per_iter = int((plan.limit_per_iter if plan else 100) or 100)
     per_iter = max(1, min(per_iter, max_iter))
 
     bm25_hits: list[dict] = []
     filt_hits: list[dict] = []
 
-    if use_bm25 and f.keywords:
-        q = " ".join(f.keywords)
-        res = await registry.invoke("bm25_search", {"query": q, "top_k": per_iter}, ctx)
+    eligible_count: int | None = None
+    if use_filters and use_bm25:
+        res = await registry.invoke(
+            "filtered_search",
+            {"query": lexical_query, "filters": f.model_dump(), "top_k": per_iter},
+            ctx,
+        )
         if res.ok:
-            bm25_hits = res.data or []
-
-    if use_filters:
+            hits = res.data or []
+            filt_hits = [{"company_id": hit["company_id"], "score": 1.0} for hit in hits]
+            bm25_hits = [hit for hit in hits if hit["score"] > 0]
+            eligible_count = res.meta.get("eligible_count")
+    elif use_filters:
         res = await registry.invoke(
             "filter_search",
             {
@@ -214,17 +215,35 @@ async def retrieve_and_score_node(
         if res.ok:
             filt_hits = res.data or []
 
-    merged = _hits_to_scored(bm25_hits, filt_hits, w_bm, w_f)
+    if use_bm25 and not hard_filters:
+        bm25_args: dict[str, Any] = {"query": lexical_query, "top_k": per_iter}
+        res = await registry.invoke("bm25_search", bm25_args, ctx)
+        if res.ok:
+            bm25_hits = res.data or []
+
+    merged = _hits_to_scored(
+        bm25_hits,
+        filt_hits,
+        w_bm,
+        w_f,
+        require_filter_match=hard_filters,
+        keyword_boost=float(plan.keyword_boost if plan else 1.0),
+    )
     capped = merged[:max_iter]
 
     ctx.add_event(
         "retrieval_iter",
         iter=state.get("iteration", 0) + 1,
+        bm25_retrieved=len(bm25_hits),
+        filter_retrieved=len(filt_hits),
         candidates_in=len(merged),
         candidates_after_cap=len(capped),
+        candidate_ids=[hit["company_id"] for hit in capped],
         top_score=capped[0]["score"] if capped else 0.0,
         use_bm25=use_bm25,
         use_filters=use_filters,
+        mandatory_filters_applied=hard_filters,
+        eligible_count=eligible_count,
     )
     return {
         "candidates": capped,
@@ -234,7 +253,7 @@ async def retrieve_and_score_node(
 
 # ─── revise_search ─────────────────────────────────────────────────────
 async def revise_search_node(state: AgentState, ctx: RunContext, llm: LLMClient) -> dict:
-    """One-shot: ask LLM to relax mandate (1 LLM call)."""
+    """One-shot keyword revision preserving all original requirements."""
     mandate = state.get("mandate")
     if mandate is None:
         return {"mandate": mandate}
@@ -273,13 +292,23 @@ async def revise_search_node(state: AgentState, ctx: RunContext, llm: LLMClient)
             ctx=ctx,
             temperature=0.3,
             max_tokens=512,
+            max_attempts=1,
+            stage="revise_search",
         )
-        new_mandate = sanitize_mandate(new_raw)
+        proposed = sanitize_mandate(new_raw, raw_query=state.get("raw_query", ""))
+        # Revision may broaden lexical recall, but it cannot silently relax
+        # mandatory filters or must-haves from the original user mandate.
+        revised_keywords = proposed.filters.keywords or mandate.filters.keywords
+        new_filters = mandate.filters.model_copy(
+            update={"keywords": list(dict.fromkeys(revised_keywords))}
+        )
+        new_mandate = mandate.model_copy(update={"filters": new_filters})
         ok = True
-    except LLMSchemaError as exc:
+    except _LLM_RECOVERABLE_ERRORS as exc:
         logger.warning("revise_search.failed", error=str(exc))
         ok = False
         new_mandate = mandate
+        ctx.add_error("revise_search", exc)
 
     ctx.add_event(
         "revise_search",
@@ -287,6 +316,7 @@ async def revise_search_node(state: AgentState, ctx: RunContext, llm: LLMClient)
         duration_ms=int((time.perf_counter() - t0) * 1000),
         iteration=state.get("iteration", 0),
         new_keywords=new_mandate.filters.keywords if ok else None,
+        mandatory_filters_preserved=True,
     )
     return {
         "mandate": new_mandate,
@@ -302,116 +332,97 @@ async def validate_candidates_node(
     company_repo: Any,
     max_validate: int,
 ) -> dict:
-    """LLM validates top-N candidates against the query (1 LLM call, batched)."""
+    """Validate at most ten eligible candidates, with grounded evidence."""
     limits = _limits(state)
-    if ctx.llm_calls >= int(limits.get("max_llm_calls_per_run", 5)):
-        # Budget exhausted: fall back to score-based ordering, mark all relevant.
-        cands = (state.get("candidates") or [])[:max_validate]
-        items: list[ValidatedItem] = []
-        for h in cands:
-            try:
-                rec = await company_repo.fetch_one(h["company_id"])
-            except CompanyNotFoundError:
-                continue
-            items.append(
-                {
-                    "company": rec,
-                    "score": h["score"],
-                    "relevant": True,
-                    "evidence": [],
-                    "reason": "budget_exhausted_no_validation",
-                }
-            )
-        return {"validation": items, "validation_ok": False}
-
-    cands = (state.get("candidates") or [])[:max_validate]
+    validation_limit = min(
+        10,
+        max_validate,
+        int(limits.get("max_candidates_to_validate", 10)),
+    )
+    cands = (state.get("candidates") or [])[:validation_limit]
     if not cands:
+        ctx.add_event(
+            "validation",
+            ok=True,
+            outcome="no_candidates",
+            candidates_in=0,
+            validated=0,
+            kept=0,
+            dropped=0,
+        )
         return {"validation": [], "validation_ok": True}
 
-    # Hydrate to full records
-    by_id: dict[int, CompanyRecord] = {}
-    for h in cands:
-        try:
-            rec = await company_repo.fetch_one(h["company_id"])
-            by_id[rec.id] = rec
-        except CompanyNotFoundError:
-            continue
+    # Search synonyms are retrieval hints, never new acceptance criteria.
+    mandate = state.get("original_mandate") or state.get("mandate")
+    if mandate is None:
+        return {"validation": [], "validation_ok": False}
 
-    # Build a single batched prompt validating all candidates at once.
-    # (Bounded by max_validate ≤ 10, so prompt stays small.)
-    lines: list[str] = []
-    for cid, rec in by_id.items():
-        lines.append(
-            f"<company id={cid}>\n"
-            f"name: {rec.name}\n"
-            f"description: {rec.description}\n"
-            f"industry: {rec.industry}\n"
-            f"location: {rec.location}\n"
-            f"employee_count: {rec.employee_count}\n"
-            f"revenue_range: {rec.revenue_range}\n"
-            f"</company>"
+    records = await company_repo.fetch_by_ids([h["company_id"] for h in cands])
+    by_id: dict[int, CompanyRecord] = {record.id: record for record in records}
+    policy = EligibilityPolicy(mandate.filters)
+    eligible: list[tuple[ScoredHit, CompanyRecord]] = [
+        (hit, by_id[hit["company_id"]])
+        for hit in cands
+        if hit["company_id"] in by_id and policy.matches(by_id[hit["company_id"]])
+    ]
+    eligibility_dropped = len(cands) - len(eligible)
+    criteria = semantic_criteria(mandate)
+    semantic_validation_needed = bool(criteria)
+
+    if not eligible:
+        ctx.add_event(
+            "validation",
+            ok=True,
+            outcome="no_eligible_candidates",
+            candidates_in=len(cands),
+            eligibility_dropped=eligibility_dropped,
+            validated=0,
+            kept=0,
+            dropped=len(cands),
         )
-    companies_block = "\n".join(lines)
+        return {"validation": [], "validation_ok": True}
 
-    from pydantic import BaseModel, Field
-    from typing import Literal
-
-    class Verdict(BaseModel):
-        company_id: int
-        relevant: bool
-        evidence_spans: list[str] = Field(default_factory=list)
-        reason: str = ""
-
-    class BatchVerdicts(BaseModel):
-        verdicts: list[Verdict]
-
-    user = (
-        f"Query: {state.get('raw_query', '')}\n\n"
-        f"Candidates:\n{companies_block}\n\n"
-        f"Return JSON with one verdict per company. "
-        f"Every evidence_spans entry MUST be an exact substring of that "
-        f"company's name+description text."
-    )
-
-    from comparables.llm.structured import schema_instructions as _si
+    if not semantic_validation_needed:
+        deterministic: list[ValidatedItem] = []
+        for hit, record in eligible:
+            evidence = policy.evidence(record)
+            deterministic.append(
+                {
+                    "company": record,
+                    "score": hit["score"],
+                    "relevant": bool(evidence),
+                    "evidence": evidence,
+                    "reason": "mandatory structured filters verified deterministically",
+                }
+            )
+        ctx.add_event(
+            "validation",
+            ok=True,
+            outcome="deterministic",
+            candidates_in=len(cands),
+            eligibility_dropped=eligibility_dropped,
+            validated=len(deterministic),
+            kept=sum(1 for item in deterministic if item["relevant"]),
+            dropped=eligibility_dropped,
+        )
+        return {"validation": deterministic, "validation_ok": True}
 
     t0 = time.perf_counter()
-    try:
-        batch: BatchVerdicts = await llm.complete_json(
-            system=VALIDATE_CANDIDATE_SYSTEM
-            + "\n\n"
-            + _si(BatchVerdicts)
-            + "\n\nReturn a `verdicts` list with one entry per company, in the same order.",
-            user=user,
-            schema_model=BatchVerdicts,
-            ctx=ctx,
-            temperature=0.0,
-            max_tokens=2048,
-        )
-        ok = True
-    except LLMSchemaError as exc:
-        logger.warning("validate.failed", error=str(exc))
-        batch = BatchVerdicts(verdicts=[])
-        ok = False
-
-    # Post-process: enforce substring grounding.
+    decisions, ok = await SemanticValidationService(llm).validate(
+        state.get("raw_query", ""), [record for _, record in eligible], criteria, ctx,
+    )
     validated: list[ValidatedItem] = []
-    for v in batch.verdicts:
-        rec = by_id.get(v.company_id)
-        if rec is None:
-            continue
-        full_text = f"{rec.name} {rec.description}"
-        grounded = [s for s in v.evidence_spans if s and s in full_text]
-        is_rel = v.relevant and bool(grounded)
+    for hit, rec in eligible:
+        decision = decisions[rec.id]
+        evidence = policy.evidence(rec) + decision.evidence if decision.relevant else []
         validated.append(
             {
                 "company": rec,
-                "score": next(
-                    (h["score"] for h in cands if h["company_id"] == rec.id), 0.0
-                ),
-                "relevant": is_rel,
-                "evidence": [Evidence(field="name+description", span=s) for s in grounded],
-                "reason": v.reason,
+                "score": hit["score"],
+                "relevant": decision.relevant,
+                "evidence": evidence,
+                "reason": decision.reason,
+                "criteria": decision.criteria,
             }
         )
 
@@ -419,9 +430,18 @@ async def validate_candidates_node(
         "validation",
         ok=ok,
         duration_ms=int((time.perf_counter() - t0) * 1000),
+        outcome="criterion_validation" if ok else "unverified",
+        criteria=[criterion.model_dump() for criterion in criteria],
+        decisions=[
+            {"company_id": item["company"].id, "relevant": item["relevant"],
+             "criteria": [assessment.model_dump() for assessment in item["criteria"]]}
+            for item in validated
+        ],
+        candidates_in=len(cands),
+        eligibility_dropped=eligibility_dropped,
         validated=len(validated),
         kept=sum(1 for v in validated if v["relevant"]),
-        dropped=sum(1 for v in validated if not v["relevant"]),
+        dropped=eligibility_dropped + sum(1 for v in validated if not v["relevant"]),
     )
     return {"validation": validated, "validation_ok": ok}
 
@@ -430,10 +450,19 @@ async def validate_candidates_node(
 async def finalize_node(state: AgentState, ctx: RunContext, max_final: int) -> dict:
     """Sort by score, drop not-relevant, cap at max_final."""
     validation = state.get("validation") or []
-    relevant = [v for v in validation if v.get("relevant")]
-    if not relevant:
-        # Fallback: best-by-score even if validation marked them out.
-        relevant = sorted(validation, key=lambda v: v.get("score", 0.0), reverse=True)
-    final = sorted(relevant, key=lambda v: v.get("score", 0.0), reverse=True)[:max_final]
-    ctx.add_event("run_end", final_count=len(final))
+    relevant = [
+        item
+        for item in validation
+        if item.get("relevant") and item.get("evidence")
+    ]
+    final = sorted(
+        relevant,
+        key=lambda item: (-item.get("score", 0.0), item["company"].id),
+    )[: min(10, max_final)]
+    ctx.add_event(
+        "finalize",
+        validation_count=len(validation),
+        relevant_count=len(relevant),
+        final_count=len(final),
+    )
     return {"final": final, "latency_ms": ctx.elapsed_ms()}

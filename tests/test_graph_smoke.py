@@ -1,12 +1,12 @@
 """Smoke test that the LangGraph graph compiles and topology is sane (no Ollama needed)."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest_asyncio
 
 from comparables.agent.graph import build_graph
+from comparables.core.config import get_settings
 from comparables.core.context import RunContext
+from comparables.db.session import Database
 from comparables.repositories.bm25_repo import BM25Repository
 from comparables.repositories.company_repo import CompanyRepository
 from comparables.tools.registry import default_registry
@@ -29,9 +29,11 @@ class _NullLLM:
 
 @pytest_asyncio.fixture
 async def graph_built():
-    cr = CompanyRepository(path=Path("data/companies.sqlite"))
-    bm = BM25Repository(path=Path("data/bm25.pkl"))
+    db = Database.from_settings()
+    await db.startup()
+    cr = CompanyRepository(db=db)
     await cr.connect()
+    bm = BM25Repository(path=get_settings().paths.bm25_pickle)
     await bm.load()
 
     ctx = RunContext.new()
@@ -66,6 +68,7 @@ async def graph_built():
     )
     yield g
     await cr.close()
+    await db.shutdown()
 
 
 def test_graph_compiles(graph_built):

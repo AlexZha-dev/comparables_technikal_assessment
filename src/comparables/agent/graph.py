@@ -44,7 +44,7 @@ def build_graph(
         return await parse_mandate_node(state, ctx, llm)
 
     async def _plan(state):
-        return await plan_search_node(state, ctx, llm)
+        return await plan_search_node(state, ctx)
 
     async def _retrieve(state):
         return await retrieve_and_score_node(state, ctx, registry, company_repo, w_bm, w_f)

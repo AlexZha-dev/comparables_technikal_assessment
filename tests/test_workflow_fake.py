@@ -5,15 +5,16 @@ Exercises the full LangGraph path:
 """
 from __future__ import annotations
 
+import asyncio
 import json
-from pathlib import Path
 from typing import Any
 
 import pytest
 import pytest_asyncio
 
 from comparables.core.config import get_settings
-from comparables.core.context import RunContext
+from comparables.core.exceptions import WorkflowTimeoutError
+from comparables.db.session import Database
 from comparables.repositories.bm25_repo import BM25Repository
 from comparables.repositories.company_repo import CompanyRepository
 from comparables.repositories.run_repo import RunRepository
@@ -42,39 +43,7 @@ class FakeLLM:
             "SearchPlan": lambda: SearchPlan(
                 use_bm25=True, use_filters=True, limit_per_iter=50
             ),
-            "BatchVerdicts": self._verdicts_for,
         }
-
-    def _verdicts_for(self) -> Any:
-        from pydantic import BaseModel, Field
-
-        class Verdict(BaseModel):
-            company_id: int
-            relevant: bool
-            evidence_spans: list[str] = Field(default_factory=list)
-            reason: str = ""
-
-        class BatchVerdicts(BaseModel):
-            verdicts: list[Verdict] = Field(default_factory=list)
-
-        # Top 3 candidates should be relevant with grounded spans
-        sample = [
-            (1, "Nordic Fintech Solutions", "AI-powered platform for fraud detection, banking analytics, and risk assessment."),
-            (2, "Baltic Payments Cloud", "Cloud-native payments infrastructure and financial data platform for digital banking."),
-            (476, None, None),  # unknown — should be handled
-        ]
-        vs = []
-        for cid, _name, desc in sample:
-            if desc:
-                vs.append(
-                    Verdict(
-                        company_id=cid,
-                        relevant=True,
-                        evidence_spans=[desc[:30]],  # take a 30-char prefix as a valid substring
-                        reason="matches AI fintech profile",
-                    )
-                )
-        return BatchVerdicts(verdicts=vs)
 
     async def complete_json(self, **kwargs):
         schema_model = kwargs.get("schema_model")
@@ -83,6 +52,15 @@ class FakeLLM:
         self.calls.append({"name": name, "kwargs": {k: v for k, v in kwargs.items() if k != "ctx"}})
         if ctx is not None:
             ctx.inc_llm(tokens_in=10, tokens_out=20)
+        if name == "BatchVerdicts":
+            from comparables.schemas.search import BatchVerdicts
+            payload = json.loads(kwargs["user"])
+            return BatchVerdicts.model_validate({"verdicts": [
+                {"company_id": record["id"], "criteria": [
+                    {"criterion_id": criterion["criterion_id"], "status": "supported" if record["id"] == 1 else "insufficient_evidence", "evidence": [{"field": "description", "span": record["description"]}] if record["id"] == 1 else []}
+                    for criterion in payload["criteria"]
+                ]} for record in payload["companies"]
+            ]})
         factory = self._answers.get(name)
         if factory is None:
             raise NotImplementedError(f"no fake answer for {name}")
@@ -98,11 +76,13 @@ class FakeLLM:
 @pytest_asyncio.fixture
 async def workflow_svc():
     settings = get_settings()
-    cr = CompanyRepository(path=Path("data/companies.sqlite"))
-    bm = BM25Repository(path=Path("data/bm25.pkl"))
+    db = Database.from_settings(settings)
+    await db.startup()
+    cr = CompanyRepository(db=db)
     await cr.connect()
+    bm = BM25Repository(path=settings.paths.bm25_pickle)
     await bm.load()
-    rr = RunRepository(runs_dir=Path("runs"))
+    rr = RunRepository(runs_dir=settings.paths.runs_dir)
     fake = FakeLLM()
     svc = WorkflowService(
         settings=settings,
@@ -113,6 +93,7 @@ async def workflow_svc():
     )
     yield svc
     await cr.close()
+    await db.shutdown()
 
 
 @pytest.mark.asyncio
@@ -123,7 +104,7 @@ async def test_workflow_end_to_end_with_fake_llm(workflow_svc):
     assert resp.run_id
     assert resp.mandate is not None
     assert resp.mandate.filters.industries == ["Fintech"]
-    assert resp.mandate.filters.employee_min == 100
+    assert resp.mandate.filters.employee_min == 101
     assert resp.llm_calls >= 1
     assert resp.llm_calls <= 5
     assert resp.iterations >= 1
@@ -133,6 +114,10 @@ async def test_workflow_end_to_end_with_fake_llm(workflow_svc):
     for c in resp.final:
         assert c.company.id >= 1
         assert c.company.name
+        assert c.company.industry == "Fintech"
+        assert c.company.location in {"Finland", "Sweden", "Norway"}
+        assert c.company.employee_count >= 101
+        assert c.relevant and c.evidence
     # At least one candidate should be kept (BM25 finds "Nordic Fintech Solutions" easily)
     assert len(resp.final) >= 1
 
@@ -146,3 +131,47 @@ async def test_workflow_persists_run_log(workflow_svc):
     assert "run_start" in types
     assert "parse_mandate" in types
     assert "run_end" in types
+
+
+@pytest.mark.asyncio
+async def test_direct_service_invocations_get_unique_run_ids(workflow_svc):
+    first = await workflow_svc.invoke("Find healthcare companies in USA")
+    second = await workflow_svc.invoke("Find healthcare companies in USA")
+    assert first.run_id != second.run_id
+
+
+@pytest.mark.asyncio
+async def test_timeout_still_persists_terminal_metrics(workflow_svc, tmp_path):
+    class SlowLLM:
+        model = "slow-fake"
+        base_url = "http://localhost:11434/v1"
+
+        async def complete_json(self, **kwargs):
+            await asyncio.sleep(0.1)
+
+    settings = workflow_svc._settings.model_copy(
+        update={
+            "limits": workflow_svc._settings.limits.model_copy(
+                update={"timeout_s": 0.01}
+            )
+        }
+    )
+    run_repo = RunRepository(tmp_path)
+    service = WorkflowService(
+        settings=settings,
+        company_repo=workflow_svc._company,
+        bm25_repo=workflow_svc._bm25,
+        llm=SlowLLM(),  # type: ignore[arg-type]
+        run_repo=run_repo,
+    )
+
+    with pytest.raises(WorkflowTimeoutError) as error:
+        await service.invoke("Find fintech in Finland")
+
+    paths = list(tmp_path.glob("*.jsonl"))
+    assert len(paths) == 1
+    assert error.value.run_id == paths[0].stem
+    log = await run_repo.read(paths[0].stem)
+    assert log is not None
+    assert log.outcome.startswith("timeout")
+    assert any(event.type == "run_end" for event in log.events)
