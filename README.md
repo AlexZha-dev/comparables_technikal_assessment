@@ -485,10 +485,9 @@ remain necessary.
 ### 1. Docker — full stack (supported route)
 
 The only runtime prerequisite is Docker Desktop / Docker Engine with the
-Compose plugin. A local `companies.json` input must be available at the
-repository root; it is intentionally ignored by Git. Python, `pip`, a local
-Ollama installation and a `.env` file are **not** required. Compose runs four
-ordered components: Ollama, a one-shot model pull,
+Compose plugin. The tracked `companies.json` catalog is mounted into the
+ingestion job. Python, `pip`, a local Ollama installation and a `.env` file are
+**not** required. Compose runs four ordered components: Ollama, a one-shot model pull,
 the one-shot catalog/BM25 ingestion job, then the API.
 
 ```powershell
@@ -515,7 +514,19 @@ Health endpoints:
   reported as a soft signal because semantic validation fails closed when the
   provider is unavailable.
 
-### 2. Manual API and reports
+### 2. Local Poetry development
+
+```powershell
+python -m poetry install
+python -m poetry run python -m scripts.ingest
+python -m poetry run uvicorn comparables.main:app --reload
+python -m poetry run pytest -q
+```
+
+Poetry creates the isolated environment from `pyproject.toml` and the committed
+`poetry.lock` file.
+
+### 3. Manual API and reports
 
 ```powershell
 $body = @{ query = 'Find AI-driven fintech companies in the Nordics with more than 100 employees' } | ConvertTo-Json
@@ -542,7 +553,7 @@ The `catalog_data`, `run_data` and `ollama_data` named volumes survive
 `docker compose down`. `docker compose down -v` is an explicit destructive
 reset: it deletes those three volumes and forces the model to download again.
 
-### 3. Tests
+### 4. Tests
 
 ```powershell
 # Fast deterministic suite; no local Python or provider is used.
@@ -613,11 +624,11 @@ next steps to take this from assessment-grade to production-grade:
 
 ```
 .
-├── PLAN.md                          # frozen implementation plan
 ├── pyproject.toml
+├── poetry.lock
 ├── Dockerfile
 ├── docker-compose.yml
-├── companies.json                   # local input (50k companies, gitignored)
+├── companies.json                   # tracked input (50k companies)
 ├── .env / .env.example
 ├── data/                            # gitignored
 │   ├── companies.sqlite
@@ -639,8 +650,7 @@ next steps to take this from assessment-grade to production-grade:
 │   ├── tools/                       # @tool-decorated deterministic tools
 │   ├── agent/                       # LangGraph (state, prompts, nodes, edges, graph, sanitize)
 │   └── llm/                         # LLMClient + structured output
-├── tests/                           # pytest, asyncio_mode=auto
-└── .claude/skills/                  # project-scoped dev skills
+└── tests/                           # pytest, asyncio_mode=auto
 ```
 
 ---

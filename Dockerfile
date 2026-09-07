@@ -11,22 +11,25 @@
 # ─── Stage 1: deps + build cache ──────────────────────────────────────
 FROM python:3.11-slim AS builder
 
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+ENV POETRY_VERSION=2.4.1 \
+    POETRY_VIRTUALENVS_CREATE=false \
+    POETRY_NO_INTERACTION=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /app
 
-COPY pyproject.toml README.md ./
-# If you switch to a src layout with __init__.py only, pip install . works
-# without an sdist step.
+RUN pip install --no-cache-dir "poetry==$POETRY_VERSION"
+
+COPY pyproject.toml poetry.lock README.md ./
 COPY src ./src
-RUN pip install .
+RUN poetry install --only main --no-ansi
 
 # Test dependencies are deliberately isolated from the runtime image. The
 # `test` target below makes every documented check reproducible in Docker.
 FROM builder AS test-deps
-RUN pip install ".[dev]"
+RUN poetry install --with dev --no-ansi
 
 # ─── Stage 2: runtime ────────────────────────────────────────────────
 FROM python:3.11-slim AS runtime
@@ -49,7 +52,7 @@ COPY scripts ./scripts
 COPY --chown=app:app eval ./eval
 COPY migrations ./migrations
 COPY alembic.ini ./alembic.ini
-COPY pyproject.toml README.md ./
+COPY pyproject.toml poetry.lock README.md ./
 
 # Entry point: alembic upgrade head, then uvicorn.
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh

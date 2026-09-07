@@ -7,7 +7,7 @@ Two ways to launch:
 
 The direct form needs `src/` on `sys.path` so relative-ish imports work; we
 patch that on first import. Module-form works because `comparableS` is already
-on the path after `pip install -e .`.
+on the path after `poetry install`.
 
 All knobs (host, port, reload, log level) come from typed `Settings`. CLI
 overrides are optional; precedence is `CLI > env > .env > defaults`.

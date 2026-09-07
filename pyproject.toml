@@ -4,8 +4,8 @@ version = "0.1.0"
 description = "Agentic search system over a 50k company catalog (Comparables.ai technical assessment)."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
-authors = [{ name = "Candidate" }]
+license = "LicenseRef-Proprietary"
+authors = [{ name = "AlexZha-dev", email = "oleksandr.zhabchenko.work@outlook.com" }]
 
 dependencies = [
     # API
@@ -33,22 +33,21 @@ dependencies = [
     "tiktoken>=0.7",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "pytest-cov>=5.0",
-    "ruff>=0.5",
-    "mypy>=1.10",
-    "types-requests",
-]
+[tool.poetry]
+requires-poetry = ">=2.0"
+packages = [{ include = "comparables", from = "src" }]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+pytest-asyncio = ">=0.23"
+pytest-cov = ">=5.0"
+ruff = ">=0.5"
+mypy = ">=1.10"
+types-requests = "*"
 
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools.packages.find]
-where = ["src"]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"
 
 [tool.ruff]
 line-length = 100

@@ -23,7 +23,7 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 # Make `comparables` importable when alembic is invoked from the repo root
-# without `pip install -e .`. The repo's src/ layout requires this.
+# without `poetry install`. The repo's src/ layout requires this.
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SRC = _PROJECT_ROOT / "src"
 if str(_SRC) not in sys.path:
