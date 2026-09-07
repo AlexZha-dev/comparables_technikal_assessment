@@ -414,8 +414,9 @@ Per-query structural checks (always required):
 
 Run:
 
-```bash
-python -m scripts.run_eval --report eval/report.md
+```powershell
+docker compose exec app python -m scripts.run_eval --report /app/runs/eval-report.md
+docker compose cp app:/app/runs/eval-report.md .\eval-report.md
 ```
 
 Exit code 0 = all pass, 1 = at least one fail.
@@ -427,9 +428,10 @@ cases (negation, conjunction, paraphrase, missing evidence, aspirations and prom
 injection), and 8 retrieval cases with exhaustive relevant IDs for this small
 corpus. Labels are **assistant-curated, not independently human reviewed**.
 
-```bash
-python -m scripts.eval_relevance --report eval/relevance-report.md
-python -m scripts.eval_relevance --live --report eval/relevance-live.md
+```powershell
+docker compose exec app python -m scripts.eval_relevance --report /app/runs/relevance-report.md
+docker compose exec app python -m scripts.eval_relevance --live --report /app/runs/relevance-live.md
+docker compose cp app:/app/runs/relevance-live.md .\relevance-live.md
 ```
 
 Offline mode measures actual SQL/BM25 P@5, recall@100 and NDCG@5. Live mode uses
@@ -484,66 +486,76 @@ remain necessary. Walkthrough: [Guids/07](Guids/07-Retrieval-and-Semantic-Evalua
 
 ## Quickstart
 
-### 1. Local — without Docker
+### 1. Docker — full stack (supported route)
 
-Requires Python 3.11+, `pip install -e ".[dev]"`, and Ollama running on
-`localhost:11434` with the model pulled.
+The only runtime prerequisite is Docker Desktop / Docker Engine with the
+Compose plugin. The checked-out `companies.json` must remain in the repository
+root; Python, `pip`, a local Ollama installation and a `.env` file are **not**
+required. Compose runs four ordered components: Ollama, a one-shot model pull,
+the one-shot catalog/BM25 ingestion job, then the API.
 
-```bash
-# Install Ollama: https://ollama.com/download
-ollama serve &
-ollama pull ministral-3:3b
+```powershell
+# Run from the repository root. First start downloads the default 3 GB model.
+docker compose config --quiet
+docker compose up --build --wait -d
+docker compose ps
 
-# In this repo
-cp .env.example .env             # adjust if needed
-pip install -e ".[dev]"
-
-# Ingest the 50k dataset
-python -m scripts.ingest
-
-# Run the API
-uvicorn comparables.main:app --reload
-
-# In another shell, smoke test
-curl -X POST http://localhost:8000/api/v1/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "AI-driven fintech in Finland > 100 employees"}'
-
-# Run the full eval
-python -m scripts.run_eval --report eval/report.md
+# The API is ready only after SQLite and BM25 are usable.
+Invoke-RestMethod http://localhost:8000/api/v1/health/ready
 ```
 
-OpenAPI / docs at `http://localhost:8000/docs`.
+Ollama is intentionally internal to the Compose network, so an already running
+local Ollama does not conflict. Only API port `8000` is published. Change the
+model for a fresh/changed deployment by setting `LLM__MODEL` in the shell or
+an untracked `.env`, then re-run `docker compose up --build --wait -d`.
+
+OpenAPI is available at `http://localhost:8000/docs`.
 
 Health endpoints:
 
 - `GET /api/v1/health/live` — process is alive.
-- `GET /api/v1/health/ready` — BM25 loaded, LLM reachable, SQLite open.
+- `GET /api/v1/health/ready` — SQLite and BM25 are required; `llm_ready` is
+  reported as a soft signal because semantic validation fails closed when the
+  provider is unavailable.
 
-### 2. Docker — full stack
+### 2. Manual API and reports
 
-```bash
-docker compose build app
-docker compose run --rm --no-deps app python -m scripts.ingest
-docker compose up -d                     # starts ollama + auto-pulls the model + app
+```powershell
+$body = @{ query = 'Find AI-driven fintech companies in the Nordics with more than 100 employees' } | ConvertTo-Json
+$result = Invoke-RestMethod -Method Post -Uri http://localhost:8000/api/v1/search -ContentType application/json -Body $body
+$result | ConvertTo-Json -Depth 12
+Invoke-RestMethod http://localhost:8000/api/v1/runs/$($result.run_id) | ConvertTo-Json -Depth 12
+
+# Assessment and relevance reports persist in the run_data named volume.
 docker compose exec app python -m scripts.run_eval --report /app/runs/eval-report.md
+docker compose exec app python -m scripts.eval_relevance --report /app/runs/relevance-report.md
+docker compose exec app python -m scripts.eval_relevance --live --report /app/runs/relevance-live.md
+docker compose cp app:/app/runs/eval-report.md .\eval-report.md
 ```
 
-The `ollama-pull` one-shot service pulls `LLM__MODEL` (default
-`ministral-3:3b`) on first start. Persist the Ollama cache between runs by
-keeping the `ollama_data` volume (default).
+`--live` intentionally returns exit code 2 and writes `BLOCKED` if the chosen
+model cannot be reached; it never fabricates semantic results. The Compose
+init job makes ingestion part of every fresh `up`; it replaces the configured
+catalog. To rebuild an already-running catalog deliberately, run
+`docker compose stop app`, then `docker compose run --rm --no-deps ingest`,
+then `docker compose start app`. Restarting the stopped API makes it load the
+new SQLite/BM25 pair without needlessly executing the init job twice.
 
-Do not run local Ollama and the Compose Ollama service on the same host port.
-On Linux, ensure bind-mounted `data/` and `runs/` are writable by the non-root
-container user. Ingestion replaces the configured catalog; stop the app before
-re-ingestion so it reloads the matching BM25 artifact at startup.
+The `catalog_data`, `run_data` and `ollama_data` named volumes survive
+`docker compose down`. `docker compose down -v` is an explicit destructive
+reset: it deletes those three volumes and forces the model to download again.
 
 ### 3. Tests
 
-```bash
-pytest                                  # all unit + integration
-pytest tests/test_llm_real.py           # requires live Ollama
-pytest tests/test_sanitize.py -v        # sanitizer unit tests
+```powershell
+# Fast deterministic suite; no local Python or provider is used.
+docker compose --profile test run --build --rm --no-deps test python -m pytest -q -p no:cacheprovider
+docker compose --profile test run --build --rm --no-deps test python -m ruff check src scripts tests
+docker compose --profile test run --build --rm --no-deps test python -m mypy src
+
+# Full Compose test job: starts internal Ollama, pulls the model and executes
+# the four live-provider tests in addition to unit/integration tests.
+docker compose --profile test up --build --abort-on-container-exit --exit-code-from test test
 ```
 
 Tests build an isolated temporary catalog
