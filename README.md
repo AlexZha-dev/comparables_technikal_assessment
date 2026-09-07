@@ -15,9 +15,6 @@ failure recovery.
 > Regression check: **86 passed, 4 live tests skipped; 87% source coverage**.
 > Ruff and mypy pass (60 source files).
 
-Russian implementation walkthrough, assessment and interview preparation:
-[Guids/README.md](Guids/README.md).
-
 ---
 
 ## Table of Contents
@@ -36,9 +33,8 @@ Russian implementation walkthrough, assessment and interview preparation:
 12. [Latency & cost observations](#latency--cost-observations)
 13. [Evaluation](#evaluation)
 14. [Known limitations](#known-limitations)
-15. [Intentionally excluded](#intentionally-excluded)
-16. [Quickstart](#quickstart)
-17. [Future evolution](#future-evolution)
+15. [Quickstart](#quickstart)
+16. [Future evolution](#future-evolution)
 
 ---
 
@@ -444,7 +440,7 @@ and exit 2; regression failures yield 1. No semantic metrics are fabricated.
 Dev/holdout is only a maintenance split with a shared tiny corpus. Recall@100 on
 15 records is not a production-quality claim, and isolated validation does not
 measure parser completeness. Independent reviewers and unseen real-catalog queries
-remain necessary. Walkthrough: [Guids/07](Guids/07-Retrieval-and-Semantic-Evaluation.md).
+remain necessary.
 
 ---
 
@@ -489,9 +485,10 @@ remain necessary. Walkthrough: [Guids/07](Guids/07-Retrieval-and-Semantic-Evalua
 ### 1. Docker — full stack (supported route)
 
 The only runtime prerequisite is Docker Desktop / Docker Engine with the
-Compose plugin. The checked-out `companies.json` must remain in the repository
-root; Python, `pip`, a local Ollama installation and a `.env` file are **not**
-required. Compose runs four ordered components: Ollama, a one-shot model pull,
+Compose plugin. A local `companies.json` input must be available at the
+repository root; it is intentionally ignored by Git. Python, `pip`, a local
+Ollama installation and a `.env` file are **not** required. Compose runs four
+ordered components: Ollama, a one-shot model pull,
 the one-shot catalog/BM25 ingestion job, then the API.
 
 ```powershell
@@ -564,9 +561,6 @@ through the real ingestion path; no pre-existing `data/` is required.
 The historical degraded 5/5 report predates removal of literal acceptance.
 The current unavailable-model run is 1/5: q1–q4 fail minimum results because
 unverified candidates are withheld; q5's expected empty result passes.
-See [Guids/04](Guids/04-Testing-and-Operations.md)
-for commands, troubleshooting and the limits of each check.
-
 ---
 
 ## Future evolution
@@ -604,7 +598,7 @@ next steps to take this from assessment-grade to production-grade:
    pick up where it left off.
 
 7. **Data lineage + governance.** Each `RunLog` should embed the dataset
-   version (git SHA of `companies.json`), the prompt hash, the model version,
+   version (a fingerprint of the local catalog input), the prompt hash, the model version,
    and an immutable per-record version so an auditor can reconstruct the inputs
    and evidence. Exact model-output replay may additionally require stored outputs.
 
@@ -623,7 +617,7 @@ next steps to take this from assessment-grade to production-grade:
 ├── pyproject.toml
 ├── Dockerfile
 ├── docker-compose.yml
-├── companies.json                   # input (50k companies)
+├── companies.json                   # local input (50k companies, gitignored)
 ├── .env / .env.example
 ├── data/                            # gitignored
 │   ├── companies.sqlite
