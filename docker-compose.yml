@@ -1,20 +1,33 @@
 # Comparables.ai — full stack
 #
-# Brings up:
-#   - ollama:    the LLM server (with the configured model auto-pulled)
-#   - app:       the FastAPI service
-#
-# Usage:
-#   docker compose up --build        # build + run
-#   docker compose run --rm app python -m scripts.ingest        # one-shot ingestion
-#   docker compose run --rm app python -m scripts.run_eval       # run eval
+# Docker-first route: `docker compose up --build --wait` performs the complete
+# init chain: Ollama -> model pull + catalog ingestion -> API. The model cache,
+# catalog and run logs are preserved in named Docker volumes.
+
+x-app-environment: &app-environment
+  API__HOST: 0.0.0.0
+  API__PORT: 8000
+  API__LOG_JSON: "true"
+  API__LOG_LEVEL: ${API__LOG_LEVEL:-INFO}
+  LLM__BASE_URL: http://ollama:11434/v1
+  LLM__API_KEY: ollama
+  LLM__MODEL: ${LLM__MODEL:-ministral-3:3b}
+  LLM__TIMEOUT_S: ${LLM__TIMEOUT_S:-120}
+  LIMITS__TIMEOUT_S: ${LIMITS__TIMEOUT_S:-120}
+  PATHS__COMPANIES_JSON: /app/companies.json
+  PATHS__SQLITE: /app/data/companies.sqlite
+  PATHS__BM25_PICKLE: /app/data/bm25.pkl
+  PATHS__RUNS_DIR: /app/runs
+
+x-runtime-volumes: &runtime-volumes
+  - catalog_data:/app/data
+  - run_data:/app/runs
 
 services:
   ollama:
     image: ollama/ollama:latest
-    container_name: comparables-ollama
-    ports:
-      - "11434:11434"
+    # It remains internal to the Compose network, so a locally installed
+    # Ollama cannot conflict with this stack on port 11434.
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
@@ -35,45 +48,64 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
       MODEL: ${LLM__MODEL:-ministral-3:3b}
-    entrypoint: ["sh", "-c"]
-    command: >
-      "echo Pulling $${MODEL}... &&
-       curl -fsS -X POST $${OLLAMA_HOST}/api/pull
-       -H 'Content-Type: application/json'
-       -d '{\"name\":\"'$${MODEL}'\",\"stream\":false}' &&
-       echo Done."
+    entrypoint: ["sh", "-ec"]
+    # A one-element list is intentional: `sh -c` receives this complete
+    # multi-line program as its command string rather than only `echo`.
+    command:
+      - |
+        echo "Pulling $${MODEL}..."
+        curl -fsS -X POST "$${OLLAMA_HOST}/api/pull" \
+          -H 'Content-Type: application/json' \
+          -d "{\"name\":\"$${MODEL}\",\"stream\":false}"
+        echo "Model is ready."
+    restart: "no"
+
+  # Init job. It owns catalogue replacement and BM25 construction, so the API
+  # cannot start against a missing or mismatched SQLite/index pair.
+  ingest:
+    build:
+      context: .
+      target: runtime
+    environment: *app-environment
+    volumes:
+      - catalog_data:/app/data
+      - run_data:/app/runs
+      - ./companies.json:/app/companies.json:ro
+    command: ["python", "-m", "scripts.ingest"]
     restart: "no"
 
   app:
-    build: .
-    container_name: comparables-app
+    build:
+      context: .
+      target: runtime
     depends_on:
       ollama:
         condition: service_healthy
       ollama-pull:
         condition: service_completed_successfully
-    environment:
-      API__HOST: 0.0.0.0
-      API__PORT: 8000
-      API__LOG_JSON: "true"
-      API__LOG_LEVEL: ${API__LOG_LEVEL:-INFO}
-      LLM__BASE_URL: http://ollama:11434/v1
-      LLM__API_KEY: ollama
-      LLM__MODEL: ${LLM__MODEL:-ministral-3:3b}
-      LLM__TIMEOUT_S: ${LLM__TIMEOUT_S:-120}
-      LIMITS__TIMEOUT_S: ${LIMITS__TIMEOUT_S:-120}
-      PATHS__COMPANIES_JSON: /app/companies.json
-      PATHS__SQLITE: /app/data/companies.sqlite
-      PATHS__BM25_PICKLE: /app/data/bm25.pkl
-      PATHS__RUNS_DIR: /app/runs
+      ingest:
+        condition: service_completed_successfully
+    environment: *app-environment
     ports:
       - "8000:8000"
-    volumes:
-      - ./data:/app/data
-      - ./runs:/app/runs
-      # Mount the dataset read-only; ingestion reads it on demand.
-      - ./companies.json:/app/companies.json:ro
+    volumes: *runtime-volumes
     restart: unless-stopped
+
+  # Opt-in target for reproducible container checks. It is excluded from a
+  # normal API launch but uses the same Compose network and model service.
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    depends_on:
+      ollama-pull:
+        condition: service_completed_successfully
+    environment: *app-environment
+    command: ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+    restart: "no"
 
 volumes:
   ollama_data:
+  catalog_data:
+  run_data:

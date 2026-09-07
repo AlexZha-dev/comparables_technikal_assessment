@@ -1,15 +1,12 @@
 # Comparables.ai - app image
 #
-# Two-stage build keeps the final image small while still caching deps.
+# Multi-stage build keeps the final image small while still caching deps.
 # Base: python:3.11-slim (matches >=3.11 requirement; conservative pin).
 #
-# Build:   docker build -t comparables-app .
-# Run:     docker run --rm -p 8000:8000 \
-#             -v ${PWD}/data:/app/data \
-#             -v ${PWD}/runs:/app/runs \
-#             -v ${PWD}/companies.json:/app/companies.json:ro \
-#             -e LLM__BASE_URL=http://host.docker.internal:11434/v1 \
-#             comparables-app
+# The supported operator path is `docker compose` (see README). Compose
+# supplies the model, ingestion init job, persistent named volumes and the
+# network name for Ollama. Keeping that wiring out of this image avoids
+# hard-coded host mounts or `host.docker.internal` assumptions.
 
 # ─── Stage 1: deps + build cache ──────────────────────────────────────
 FROM python:3.11-slim AS builder
@@ -25,6 +22,11 @@ COPY pyproject.toml README.md ./
 # without an sdist step.
 COPY src ./src
 RUN pip install .
+
+# Test dependencies are deliberately isolated from the runtime image. The
+# `test` target below makes every documented check reproducible in Docker.
+FROM builder AS test-deps
+RUN pip install ".[dev]"
 
 # ─── Stage 2: runtime ────────────────────────────────────────────────
 FROM python:3.11-slim AS runtime
@@ -57,9 +59,22 @@ USER app
 
 EXPOSE 8000
 
-# Healthcheck uses the liveness endpoint defined in src/comparables/api/v1/endpoints/health.py
+# A healthy container must have a usable catalogue/index, not merely a live
+# Python process. LLM availability remains a soft signal in `/ready`.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/live', timeout=3).read()" \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/ready', timeout=3).read()" \
     || exit 1
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# Test target inherits the non-root runtime contract and entrypoint. An
+# explicit command is executed directly by entrypoint, without API startup.
+FROM runtime AS test
+COPY --from=test-deps /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=test-deps /usr/local/bin /usr/local/bin
+COPY --chown=app:app tests ./tests
+CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+
+# Keep `docker build .` production-safe: an unqualified build selects this
+# runtime stage rather than the test image with development tooling.
+FROM runtime AS production
