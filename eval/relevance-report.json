@@ -1,0 +1,164 @@
+{
+  "generated_at": "2026-09-07T17:45:50.365906+00:00",
+  "dataset_version": "1.0",
+  "dataset_sha256": "d56138e478901800b8b8ba8f8b9e119ba6e628cb83dd306e1ff31ab1e5d75529",
+  "prompt_sha256": "abbce568c04f201260767bddbb3089973350f6f49a91e2ef6b2f7b30d243dab7",
+  "provenance": {
+    "kind": "synthetic",
+    "label_author": "assistant-curated",
+    "human_reviewed": false,
+    "purpose": "Transparent adversarial regression fixture, not independently human-labeled business ground truth. Dev/holdout is a maintenance split; the small shared corpus is not a statistical generalization benchmark."
+  },
+  "split": "all",
+  "model": "ministral-3:3b",
+  "retrieval": [
+    {
+      "id": "r01",
+      "split": "dev",
+      "query": "AI fraud detection",
+      "ranked_ids": [
+        1,
+        2,
+        3,
+        15
+      ],
+      "relevant_ids": [
+        1
+      ],
+      "eligible_count": 4,
+      "contract_ok": true,
+      "latency_ms": 6.59,
+      "precision_at_5": 0.2,
+      "recall_at_100": 1.0,
+      "ndcg_at_5": 1.0
+    },
+    {
+      "id": "r02",
+      "split": "dev",
+      "query": "autonomous driving machine learning",
+      "ranked_ids": [
+        5,
+        6,
+        4
+      ],
+      "relevant_ids": [
+        4
+      ],
+      "eligible_count": 3,
+      "contract_ok": true,
+      "latency_ms": 3.67,
+      "precision_at_5": 0.2,
+      "recall_at_100": 1.0,
+      "ndcg_at_5": 0.5
+    },
+    {
+      "id": "r03",
+      "split": "dev",
+      "query": "renewable energy",
+      "ranked_ids": [
+        8,
+        7,
+        9
+      ],
+      "relevant_ids": [
+        7,
+        9
+      ],
+      "eligible_count": 3,
+      "contract_ok": true,
+      "latency_ms": 3.09,
+      "precision_at_5": 0.4,
+      "recall_at_100": 1.0,
+      "ndcg_at_5": 0.6934264036172708
+    },
+    {
+      "id": "r04",
+      "split": "dev",
+      "query": "Phase II human clinical trials completed",
+      "ranked_ids": [
+        11,
+        10
+      ],
+      "relevant_ids": [
+        11
+      ],
+      "eligible_count": 2,
+      "contract_ok": true,
+      "latency_ms": 3.05,
+      "precision_at_5": 0.2,
+      "recall_at_100": 1.0,
+      "ndcg_at_5": 1.0
+    },
+    {
+      "id": "r05",
+      "split": "holdout",
+      "query": "ISO 27001 certified",
+      "ranked_ids": [
+        13,
+        14
+      ],
+      "relevant_ids": [
+        14
+      ],
+      "eligible_count": 2,
+      "contract_ok": true,
+      "latency_ms": 2.76,
+      "precision_at_5": 0.2,
+      "recall_at_100": 1.0,
+      "ndcg_at_5": 0.6309297535714575
+    },
+    {
+      "id": "r06",
+      "split": "holdout",
+      "query": "B2B customer records on premises",
+      "ranked_ids": [
+        12
+      ],
+      "relevant_ids": [
+        12
+      ],
+      "eligible_count": 1,
+      "contract_ok": true,
+      "latency_ms": 3.36,
+      "precision_at_5": 0.2,
+      "recall_at_100": 1.0,
+      "ndcg_at_5": 1.0
+    },
+    {
+      "id": "r07",
+      "split": "holdout",
+      "query": "renewable energy startup",
+      "ranked_ids": [
+        7,
+        9,
+        8
+      ],
+      "relevant_ids": [
+        7
+      ],
+      "eligible_count": 3,
+      "contract_ok": true,
+      "latency_ms": 2.8,
+      "precision_at_5": 0.2,
+      "recall_at_100": 1.0,
+      "ndcg_at_5": 1.0
+    },
+    {
+      "id": "r08",
+      "split": "holdout",
+      "query": "AI product",
+      "ranked_ids": [],
+      "relevant_ids": [],
+      "eligible_count": 0,
+      "contract_ok": true,
+      "latency_ms": 2.55,
+      "precision_at_5": 0.0,
+      "recall_at_100": null,
+      "ndcg_at_5": null
+    }
+  ],
+  "semantic_status": "NOT_RUN",
+  "semantic_summary": null,
+  "semantic_rows": [],
+  "semantic_note": "Offline mode: only retrieval and fixture integrity were evaluated."
+}
