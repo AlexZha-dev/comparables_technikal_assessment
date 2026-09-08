@@ -26,6 +26,7 @@ x-runtime-volumes: &runtime-volumes
 services:
   ollama:
     image: ollama/ollama:latest
+    gpus: all
     # It remains internal to the Compose network, so a locally installed
     # Ollama cannot conflict with this stack on port 11434.
     volumes:
